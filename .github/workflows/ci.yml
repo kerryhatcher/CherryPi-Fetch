@@ -97,6 +97,10 @@ jobs:
           # rust-toolchain.toml selects the toolchain; the cache is managed
           # by Swatinem/rust-cache below.
           cache: false
+          # The action defaults this to "deny", which turns Cargo's own
+          # manifest warnings (e.g. homepage == repository) into errors.
+          build-warnings: ""
+
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: linux
@@ -123,6 +127,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
         with:
           cache: false
+          build-warnings: ""
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: macos
