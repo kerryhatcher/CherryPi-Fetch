@@ -161,7 +161,7 @@ fn init_logging() {
 }
 
 fn parse_url(raw: &str) -> Result<url::Url, String> {
-    let mut url = url::Url::parse(raw).map_err(|e| format!("invalid URL: {e}"))?;
+    let url = url::Url::parse(raw).map_err(|e| format!("invalid URL: {e}"))?;
     match url.scheme() {
         "http" | "https" => {}
         other => {
@@ -171,28 +171,14 @@ fn parse_url(raw: &str) -> Result<url::Url, String> {
         }
     }
     // Never send user:pass@ to the host.
-    if !url.username().is_empty() {
-        let _ = url.set_username("");
-    }
-    if url.password().is_some() {
-        let _ = url.set_password(None);
-    }
-    Ok(url)
+    Ok(cherrypi_fetch::strip_userinfo(url))
 }
 
 /// Redact any userinfo from a URL for display. A URL that cannot be parsed is
 /// shown as a placeholder, so its credentials never appear in output.
 fn redact_url(raw: &str) -> String {
     match url::Url::parse(raw) {
-        Ok(mut url) => {
-            if !url.username().is_empty() {
-                let _ = url.set_username("");
-            }
-            if url.password().is_some() {
-                let _ = url.set_password(None);
-            }
-            url.to_string()
-        }
+        Ok(url) => cherrypi_fetch::strip_userinfo(url).to_string(),
         Err(_) => "<unparsable URL>".to_string(),
     }
 }

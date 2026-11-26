@@ -1,5 +1,5 @@
 //! Positive control for the SSRF guard: with private networks allowed, the
-//! same subresource really is fetched. It is a separate test binary because
+//! same subresources really are fetched. It is a separate test binary because
 //! `configure` is process-wide.
 
 use std::io::{Read, Write};
@@ -10,6 +10,19 @@ use std::thread;
 use std::time::Duration;
 
 use cherrypi_fetch::{configure, render_page, shutdown_renderer, RendererConfig};
+
+fn clear_proxy_env() {
+    for name in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        std::env::remove_var(name);
+    }
+}
 
 /// A server that counts every request it receives and answers `secret`.
 fn counting_server() -> (String, Arc<AtomicUsize>) {
@@ -59,8 +72,17 @@ fn base64(data: &[u8]) -> String {
     out
 }
 
+fn data_page(html: &str) -> url::Url {
+    url::Url::parse(&format!(
+        "data:text/html;base64,{}",
+        base64(html.as_bytes())
+    ))
+    .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn fetches_a_private_subresource_when_allowed() {
+async fn fetches_private_subresources_when_allowed() {
+    clear_proxy_env();
     configure(RendererConfig {
         user_agent: "ssrf-positive/1.0".into(),
         allow_private_networks: true,
@@ -68,18 +90,38 @@ async fn fetches_a_private_subresource_when_allowed() {
     .unwrap();
 
     let (secret, hits) = counting_server();
-    let html = format!("<html><body>hello<img src=\"{secret}\"></body></html>");
-    let page_url = url::Url::parse(&format!(
-        "data:text/html;base64,{}",
-        base64(html.as_bytes())
-    ))
-    .unwrap();
-    let _ = render_page(page_url, Duration::from_secs(10)).await;
-
+    let page = data_page(&format!(
+        "<html><body>hello<img src=\"{secret}\"></body></html>"
+    ));
+    let _ = render_page(page, Duration::from_secs(10)).await;
     thread::sleep(Duration::from_millis(300));
     assert!(
         hits.load(Ordering::SeqCst) >= 1,
         "the private subresource was not fetched even though it was allowed"
+    );
+
+    // The worker's fetch is a positive control for the worker case too.
+    let (worker_secret, worker_hits) = counting_server();
+    let worker_page = data_page(&format!(
+        "<html><body><div id='out'>no worker</div>\
+         <script>\
+         var blob = new Blob(['postMessage(\"ran\"); fetch(\"{worker_secret}\")'], {{type: 'text/javascript'}});\
+         var w = new Worker(URL.createObjectURL(blob));\
+         w.onmessage = function (e) {{ document.getElementById('out').textContent = 'worker-' + e.data; }};\
+         </script></body></html>"
+    ));
+    let page = render_page(worker_page, Duration::from_secs(10))
+        .await
+        .expect("the worker page should render");
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        page.text.contains("worker-ran"),
+        "the worker did not run: {:?}",
+        page.text
+    );
+    assert!(
+        worker_hits.load(Ordering::SeqCst) >= 1,
+        "the allowed worker fetch was not made"
     );
 
     shutdown_renderer();

@@ -43,8 +43,8 @@ use reqwest::header::{
 };
 use servo::{
     CookieSource, EventLoopWaker, JSValue, LoadStatus, Preferences, RenderingContext, Servo,
-    ServoBuilder, SoftwareRenderingContext, StorageType, WebResourceLoad, WebResourceResponse,
-    WebView, WebViewBuilder, WebViewDelegate,
+    ServoBuilder, ServoDelegate, SoftwareRenderingContext, StorageType, WebResourceLoad,
+    WebResourceResponse, WebView, WebViewBuilder, WebViewDelegate,
 };
 
 /// User-Agent sent when [`configure`] is not called. It claims Windows on
@@ -171,8 +171,15 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
     if (s[0] & 0xffc0) == 0xfec0 {
         return false;
     }
-    // Documentation 2001:db8::/32 and Teredo 2001::/32.
-    if s[0] == 0x2001 && (s[1] == 0x0db8 || s[1] == 0x0000) {
+    // Teredo 2001::/32, documentation 2001:db8::/32, benchmarking
+    // 2001:2::/48 and ORCHID 2001:10::/28 and 2001:20::/28.
+    if s[0] == 0x2001
+        && (s[1] == 0x0000
+            || s[1] == 0x0db8
+            || s[1] == 0x0002
+            || (s[1] & 0xfff0) == 0x0010
+            || (s[1] & 0xfff0) == 0x0020)
+    {
         return false;
     }
     // 6to4 2002::/16 embeds an IPv4 address.
@@ -187,6 +194,17 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
         if s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0 {
             return is_public_ipv4(embedded_ipv4(s[6], s[7]));
         }
+    }
+    // SIIT ::ffff:0:0/96 embeds an IPv4 address, like the mapped form.
+    if s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0xffff && s[5] == 0 {
+        return is_public_ipv4(embedded_ipv4(s[6], s[7]));
+    }
+    // Documentation 3fff::/20 and SRv6 5f00::/16.
+    if s[0] == 0x3fff && (s[1] & 0xf000) == 0 {
+        return false;
+    }
+    if s[0] == 0x5f00 {
+        return false;
     }
     // IPv4-compatible ::/96.
     if s[0..6].iter().all(|&x| x == 0) {
@@ -253,10 +271,12 @@ fn check_scheme(url: &url::Url) -> Result<(), String> {
 /// The first proxy environment variable that is set, if any. Servo's own
 /// network stack honours these too, so they move requests off the checked path.
 fn proxy_environment_variable() -> Option<String> {
-    std::env::vars().find_map(|(name, value)| {
-        let upper = name.to_ascii_uppercase();
+    // `vars_os`, not `vars`: a non-UTF-8 variable elsewhere in the environment
+    // must not panic the render.
+    std::env::vars_os().find_map(|(name, value)| {
+        let upper = name.to_string_lossy().to_ascii_uppercase();
         (matches!(upper.as_str(), "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY") && !value.is_empty())
-            .then_some(name)
+            .then_some(upper)
     })
 }
 
@@ -279,7 +299,7 @@ async fn check_destination(url: &url::Url) -> Result<Vec<IpAddr>, String> {
 }
 
 /// Remove `user:pass@` from a URL, so credentials are never sent to a host.
-fn strip_userinfo(mut url: url::Url) -> url::Url {
+pub fn strip_userinfo(mut url: url::Url) -> url::Url {
     if !url.username().is_empty() {
         let _ = url.set_username("");
     }
@@ -398,6 +418,9 @@ pub async fn render_page(url: url::Url, timeout: Duration) -> Result<RenderedPag
     if timeout.is_zero() || timeout > MAX_TIMEOUT {
         return Err(RenderError::InvalidTimeout);
     }
+    // One deadline for the address check and the render, so the total stays
+    // inside the caller's budget.
+    let deadline = Instant::now() + timeout;
     let url = strip_userinfo(url);
     if let Err(e) = check_scheme(&url) {
         return Err(RenderError::Failed(e));
@@ -409,7 +432,7 @@ pub async fn render_page(url: url::Url, timeout: Duration) -> Result<RenderedPag
                  allow private networks for local testing"
             )));
         }
-        match tokio::time::timeout(timeout, check_destination(&url)).await {
+        match tokio::time::timeout(time_left(deadline), check_destination(&url)).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => return Err(RenderError::Failed(e)),
             Err(_) => {
@@ -420,25 +443,31 @@ pub async fn render_page(url: url::Url, timeout: Duration) -> Result<RenderedPag
             }
         }
     }
+    let remaining = time_left(deadline);
     let runtime = tokio::runtime::Handle::current();
     let result = tokio::task::spawn_blocking(move || -> Result<RenderedPage, String> {
         let jobs = renderer()?;
         let (reply, result) = mpsc::channel();
         jobs.send(Job {
             url,
-            timeout,
+            timeout: remaining,
             runtime,
             reply,
         })
         .map_err(|_| "Servo render thread is not running".to_string())?;
         result
-            .recv_timeout(timeout + REPLY_SLACK)
+            .recv_timeout(remaining + REPLY_SLACK)
             .map_err(|e| format!("render did not finish: {e}"))?
     })
     .await
     .map_err(|e| format!("render task failed: {e}"))
     .and_then(|r| r);
     result.map_err(RenderError::Failed)
+}
+
+/// The time left before `deadline`, which may be zero.
+fn time_left(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
 }
 
 /// Start the render thread on first use and return a sender for its jobs.
@@ -493,6 +522,10 @@ fn render_thread(jobs: mpsc::Receiver<Job>) {
         .preferences(prefs)
         .event_loop_waker(Box::new(NoopWaker))
         .build();
+    // Loads with no live webview (for example, a request from a render that
+    // has already returned) go to this delegate. Dropping one would let Servo
+    // fetch it unchecked, so cancel it.
+    servo.set_delegate(Rc::new(CancelUnhandledLoads));
 
     let context =
         match SoftwareRenderingContext::new(PhysicalSize::new(VIEWPORT_WIDTH, VIEWPORT_HEIGHT)) {
@@ -510,6 +543,16 @@ fn render_thread(jobs: mpsc::Receiver<Job>) {
     for job in jobs {
         let result = render_one(&servo, &context, &job);
         let _ = job.reply.send(result);
+    }
+}
+
+/// Cancels every load that is not tied to a live webview, which is where a
+/// request from a finished render ends up.
+struct CancelUnhandledLoads;
+
+impl ServoDelegate for CancelUnhandledLoads {
+    fn load_web_resource(&self, load: WebResourceLoad) {
+        cancel_load(load);
     }
 }
 
@@ -586,26 +629,35 @@ type ProxyResult = Result<ProxiedResponse, String>;
 /// to a different host into an error, instead of following it or handing the
 /// 3xx back to the page. Only the first hop was checked, so only same-host
 /// redirects are followed.
-fn redirect_policy(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Action {
-    let host = attempt.url().host_str().unwrap_or_default().to_string();
-    if host.is_empty() {
-        return attempt.error("refusing a redirect with no host");
-    }
-    if let Some(ip) = parse_ip_literal(&host) {
-        if !is_public_address(ip) {
-            return attempt.error("refusing a redirect to a non-public address");
+/// Whether a redirect from `from_host` to `next` is allowed. Pure, so the
+/// policy can be unit-tested in default mode.
+fn redirect_decision(from_host: &str, next: &url::Url, allow_private: bool) -> Result<(), String> {
+    let Some(host) = next.host_str() else {
+        return Err("a redirect with no host".to_string());
+    };
+    if let Some(ip) = parse_ip_literal(host) {
+        if !allow_private && !is_public_address(ip) {
+            return Err("a redirect to a non-public address".to_string());
         }
     }
-    let first_host = attempt
+    if !allow_private && host != from_host {
+        return Err("a redirect to a different host".to_string());
+    }
+    Ok(())
+}
+
+fn redirect_policy(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Action {
+    let from_host = attempt
         .previous()
         .first()
         .and_then(|first| first.host_str())
         .unwrap_or_default()
         .to_string();
-    if first_host != host {
-        return attempt.error("refusing a redirect to a different host");
+    let next = attempt.url().clone();
+    match redirect_decision(&from_host, &next, allow_private_networks()) {
+        Ok(()) => attempt.follow(),
+        Err(e) => attempt.error(e),
     }
-    attempt.follow()
 }
 
 /// Requests made on the page's behalf that have not been answered yet.
@@ -617,6 +669,8 @@ struct Proxy {
     checking: HashMap<u64, WebResourceLoad>,
     /// Loads whose request we make ourselves.
     in_flight: HashMap<u64, WebResourceLoad>,
+    /// The spawned fetch task for each in-flight request.
+    tasks: HashMap<u64, tokio::task::JoinHandle<()>>,
     /// When a request last started or finished.
     last_activity: Option<Instant>,
     check_tx: mpsc::Sender<(u64, Result<Vec<IpAddr>, String>)>,
@@ -635,6 +689,7 @@ impl Proxy {
             next_id: 0,
             checking: HashMap::new(),
             in_flight: HashMap::new(),
+            tasks: HashMap::new(),
             last_activity: None,
             check_tx,
             check_rx,
@@ -754,7 +809,7 @@ impl Proxy {
         self.in_flight.insert(id, load);
         self.last_activity = Some(Instant::now());
         let done = self.done_tx.clone();
-        self.runtime.spawn(async move {
+        let handle = self.runtime.spawn(async move {
             let result = tokio::time::timeout(REQUEST_TIMEOUT, fetch(client, url, headers))
                 .await
                 .unwrap_or_else(|_| {
@@ -765,6 +820,7 @@ impl Proxy {
                 });
             let _ = done.send((id, result));
         });
+        self.tasks.insert(id, handle);
     }
 
     /// Cancel every load that is still waiting, so none is dropped and
@@ -776,6 +832,9 @@ impl Proxy {
         for (_, load) in self.in_flight.drain() {
             cancel_load(load);
         }
+        for (_, handle) in self.tasks.drain() {
+            handle.abort();
+        }
     }
 
     /// Hand finished requests back to Servo. A failed request becomes a
@@ -785,6 +844,7 @@ impl Proxy {
             let Some(load) = self.in_flight.remove(&id) else {
                 continue;
             };
+            self.tasks.remove(&id);
             self.last_activity = Some(Instant::now());
             match result {
                 Ok(response) => {
@@ -1435,6 +1495,23 @@ mod tests {
     }
 
     #[test]
+    fn redirect_decision_allows_public_same_host_only() {
+        let private = url::Url::parse("http://127.0.0.1:9/").unwrap();
+        assert!(redirect_decision("example.com", &private, false).is_err());
+        assert!(redirect_decision("example.com", &private, true).is_ok());
+
+        let other = url::Url::parse("http://other.example/").unwrap();
+        assert!(redirect_decision("example.com", &other, false).is_err());
+        assert!(redirect_decision("example.com", &other, true).is_ok());
+
+        let same = url::Url::parse("http://example.com/next").unwrap();
+        assert!(redirect_decision("example.com", &same, false).is_ok());
+
+        let no_host = url::Url::parse("data:text/plain,hi").unwrap();
+        assert!(redirect_decision("example.com", &no_host, false).is_err());
+    }
+
+    #[test]
     fn normalizes_text_lines() {
         assert_eq!(normalize_text("  a   b \n\n \t\n c\n"), "a b\nc");
     }
@@ -1503,6 +1580,14 @@ mod tests {
             "fec0::1",
             "::7f00:1",
             "100::1",
+            // SIIT, benchmarking, ORCHID, RFC 9637 documentation and SRv6.
+            "::ffff:0:127.0.0.1",
+            "::ffff:0:a9fe:a9fe",
+            "2001:2::1",
+            "2001:10::1",
+            "2001:20::1",
+            "3fff::1",
+            "5f00::1",
         ] {
             assert!(
                 !is_public_address(addr.parse().unwrap()),

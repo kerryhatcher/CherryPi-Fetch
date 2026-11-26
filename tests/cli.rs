@@ -36,7 +36,20 @@ fn serve() -> String {
 }
 
 fn cherrypi_fetch() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_cherrypi-fetch"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cherrypi-fetch"));
+    // A proxy in the environment would refuse the render, so remove it unless
+    // a test sets one on purpose.
+    for name in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        command.env_remove(name);
+    }
+    command
 }
 
 #[test]
@@ -120,6 +133,37 @@ fn does_not_echo_credentials_for_rejected_urls() {
             "credentials leaked for {url}: {stdout} {stderr}"
         );
     }
+}
+
+#[test]
+fn refuses_to_render_when_a_proxy_is_set() {
+    let url = serve();
+    let output = cherrypi_fetch()
+        .env("HTTP_PROXY", "http://127.0.0.1:1")
+        .args(["--json", &url])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("HTTP_PROXY"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn does_not_panic_on_a_non_utf8_environment() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let url = serve();
+    let output = cherrypi_fetch()
+        .env("BADVAR", OsStr::from_bytes(b"\xff\xfe"))
+        .args(["--json", &url])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    // The loopback address is still refused, just not by a panic.
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
 }
 
 #[test]

@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `RendererConfig` gained an `allow_private_networks` field, so a struct
   literal needs updating; `RendererConfig::default()` is unchanged.
 
+### Changed
+
+- A same-origin script GET that redirects to another host now fails with a
+  network error instead of following the redirect. A redirect to a non-public
+  address is refused either way. With `allow_private_networks` set, redirects
+  are followed again.
+
 ### Added
 
 - Private, loopback and link-local destinations are refused by default, for
