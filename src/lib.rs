@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use content_security_policy::Destination;
 use dpi::PhysicalSize;
 use reqwest::header::{
-    HeaderMap, HeaderValue, COOKIE, REFERER, SET_COOKIE, USER_AGENT as UA_HEADER,
+    HeaderMap, HeaderValue, ACCEPT_ENCODING, COOKIE, REFERER, SET_COOKIE, USER_AGENT as UA_HEADER,
 };
 use servo::{
     CookieSource, EventLoopWaker, JSValue, LoadStatus, Preferences, RenderingContext, Servo,
@@ -675,6 +675,55 @@ struct ProxiedResponse {
 
 type ProxyResult = Result<ProxiedResponse, String>;
 
+/// A request from a redirect chain to the render thread, which alone can read
+/// and write Servo's cookie jar. The chain is async and runs on the runtime, so
+/// it asks for cookies over this channel and receives only plain strings.
+enum CookieRequest {
+    /// The `Cookie` header for a request to `url`, if the jar has any cookies
+    /// for it.
+    Read {
+        url: url::Url,
+        reply: tokio::sync::oneshot::Sender<Option<String>>,
+    },
+    /// The `Set-Cookie` headers a response from `url` carried.
+    Store {
+        url: url::Url,
+        set_cookies: Vec<String>,
+    },
+}
+
+/// The chain's end of the cookie channel.
+#[derive(Clone)]
+struct CookieLink(mpsc::Sender<CookieRequest>);
+
+impl CookieLink {
+    /// The jar's `Cookie` header for `url`. Requests are answered in order, so
+    /// the answer reflects every `store` sent before it.
+    async fn header_for(&self, url: &url::Url) -> Result<Option<String>, String> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.0
+            .send(CookieRequest::Read {
+                url: url.clone(),
+                reply,
+            })
+            .map_err(|_| "the render thread stopped".to_string())?;
+        answer
+            .await
+            .map_err(|_| "the render thread did not answer".to_string())
+    }
+
+    /// Store the `Set-Cookie` headers of a response from `url`, so the next hop
+    /// is sent them.
+    fn store(&self, url: &url::Url, set_cookies: Vec<String>) {
+        if !set_cookies.is_empty() {
+            let _ = self.0.send(CookieRequest::Store {
+                url: url.clone(),
+                set_cookies,
+            });
+        }
+    }
+}
+
 /// Whether a redirect from `from_host` to `next` is allowed. Pure, so the
 /// policy can be unit-tested in default mode.
 fn redirect_decision(from_host: &str, next: &url::Url, allow_private: bool) -> Result<(), String> {
@@ -725,12 +774,17 @@ struct Proxy {
     check_rx: mpsc::Receiver<(u64, Result<Vec<IpAddr>, String>)>,
     done_tx: mpsc::Sender<(u64, ProxyResult)>,
     done_rx: mpsc::Receiver<(u64, ProxyResult)>,
+    /// The redirect chains' end of the cookie channel.
+    cookies: CookieLink,
+    /// Answers the redirect chains' cookie requests on the render thread.
+    cookie_rx: mpsc::Receiver<CookieRequest>,
 }
 
 impl Proxy {
     fn new(runtime: tokio::runtime::Handle, allow_private: bool) -> Self {
         let (done_tx, done_rx) = mpsc::channel();
         let (check_tx, check_rx) = mpsc::channel();
+        let (cookie_tx, cookie_rx) = mpsc::channel();
         Self {
             runtime,
             allow_private,
@@ -743,6 +797,8 @@ impl Proxy {
             check_rx,
             done_tx,
             done_rx,
+            cookies: CookieLink(cookie_tx),
+            cookie_rx,
         }
     }
 
@@ -809,6 +865,21 @@ impl Proxy {
         self.tasks.insert(id, handle);
     }
 
+    /// Answer the redirect chains' cookie requests from Servo's jar. Only this
+    /// thread may touch the jar.
+    fn serve_cookies(&mut self, servo: &Servo) {
+        while let Ok(request) = self.cookie_rx.try_recv() {
+            match request {
+                CookieRequest::Read { url, reply } => {
+                    let _ = reply.send(cookie_header(servo, &url));
+                }
+                CookieRequest::Store { url, set_cookies } => {
+                    store_set_cookies(servo, &url, &set_cookies);
+                }
+            }
+        }
+    }
+
     /// Hand finished checks back. A refused load becomes a network error in
     /// the page; an allowed one is proxied or left to Servo.
     fn deliver_checks(&mut self, servo: &Servo) {
@@ -847,15 +918,8 @@ impl Proxy {
         let request = &load.request;
         let url = strip_userinfo(request.url.clone().into_url());
         let mut headers = request.headers.clone();
-        let cookies = servo
-            .site_data_manager()
-            .cookies_for_url(url.clone(), CookieSource::HTTP);
-        if !cookies.is_empty() {
-            let pairs: Vec<String> = cookies
-                .iter()
-                .map(|c| format!("{}={}", c.name(), c.value()))
-                .collect();
-            if let Ok(value) = HeaderValue::from_str(&pairs.join("; ")) {
+        if let Some(cookie) = cookie_header(servo, &url) {
+            if let Ok(value) = HeaderValue::from_str(&cookie) {
                 headers.insert(COOKIE, value);
             }
         }
@@ -882,14 +946,17 @@ impl Proxy {
         self.last_activity = Some(Instant::now());
         let done = self.done_tx.clone();
         let handle = self.runtime.spawn(async move {
-            let result = tokio::time::timeout(REQUEST_TIMEOUT, fetch(client, url, headers))
-                .await
-                .unwrap_or_else(|_| {
-                    Err(format!(
-                        "no response within {} seconds",
-                        REQUEST_TIMEOUT.as_secs()
-                    ))
-                });
+            let result = tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                fetch(client, url, reqwest::Method::GET, headers),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(format!(
+                    "no response within {} seconds",
+                    REQUEST_TIMEOUT.as_secs()
+                ))
+            });
             let _ = done.send((id, result));
         });
         self.tasks.insert(id, handle);
@@ -911,18 +978,28 @@ impl Proxy {
         }
         let id = self.next_id;
         self.next_id += 1;
+        // submit allows only GET and HEAD here.
+        let method = if request.method.as_str() == "HEAD" {
+            reqwest::Method::HEAD
+        } else {
+            reqwest::Method::GET
+        };
+        let cookies = self.cookies.clone();
         self.in_flight.insert(id, load);
         self.last_activity = Some(Instant::now());
         let done = self.done_tx.clone();
         let handle = self.runtime.spawn(async move {
-            let result = tokio::time::timeout(REQUEST_TIMEOUT, fetch_redirect_chain(url, headers))
-                .await
-                .unwrap_or_else(|_| {
-                    Err(format!(
-                        "no response within {} seconds",
-                        REQUEST_TIMEOUT.as_secs()
-                    ))
-                });
+            let result = tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                fetch_redirect_chain(url, method, headers, cookies),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(format!(
+                    "no response within {} seconds",
+                    REQUEST_TIMEOUT.as_secs()
+                ))
+            });
             let _ = done.send((id, result));
         });
         self.tasks.insert(id, handle);
@@ -953,7 +1030,7 @@ impl Proxy {
             self.last_activity = Some(Instant::now());
             match result {
                 Ok(response) => {
-                    store_cookies(servo, &response);
+                    store_set_cookies(servo, &response.url, &set_cookie_values(&response.headers));
                     let mut headers = response.headers;
                     for name in HOP_BY_HOP {
                         headers.remove(*name);
@@ -986,16 +1063,34 @@ impl Proxy {
 
 /// Follow `url`'s redirects ourselves, checking and pinning every hop. The
 /// first hop is requested twice: Servo already made it and its redirect is
-/// the load being answered.
-async fn fetch_redirect_chain(url: url::Url, headers: HeaderMap) -> ProxyResult {
+/// the load being answered. Each hop is sent the jar's cookies for its own
+/// URL, and each hop's `Set-Cookie` is stored for the hops after it.
+async fn fetch_redirect_chain(
+    url: url::Url,
+    method: reqwest::Method,
+    headers: HeaderMap,
+    cookies: CookieLink,
+) -> ProxyResult {
     let mut url = url;
     for _ in 0..MAX_REDIRECTS {
+        // Checks the scheme and address, and each target is checked before it
+        // is requested, including the first hop.
         let addrs = check_destination(&url).await?;
         let client = pinned_client(&url, &addrs, false)?;
-        let response = fetch(client, url.clone(), headers.clone()).await?;
+        // The jar's cookies for this URL replace whatever the page sent, so a
+        // cookie for one host never goes to another.
+        let mut hop_headers = headers.clone();
+        hop_headers.remove(COOKIE);
+        if let Some(cookie) = cookies.header_for(&url).await? {
+            if let Ok(value) = HeaderValue::from_str(&cookie) {
+                hop_headers.insert(COOKIE, value);
+            }
+        }
+        let response = fetch(client, url.clone(), method.clone(), hop_headers).await?;
         if !response.status.is_redirection() {
             return Ok(response);
         }
+        cookies.store(&url, set_cookie_values(&response.headers));
         let location = response
             .headers
             .get(reqwest::header::LOCATION)
@@ -1046,9 +1141,23 @@ fn cancel_load(load: WebResourceLoad) {
     load.intercept(WebResourceResponse::new(url)).cancel();
 }
 
-async fn fetch(client: reqwest::Client, url: url::Url, headers: HeaderMap) -> ProxyResult {
-    let mut response = client
-        .get(url)
+/// Request `url` with `method`, which is GET or HEAD. A HEAD response has no
+/// body, so none is read. The page's own `Accept-Encoding` is dropped: reqwest
+/// advertises the encodings it decodes and the body is delivered decoded.
+async fn fetch(
+    client: reqwest::Client,
+    url: url::Url,
+    method: reqwest::Method,
+    mut headers: HeaderMap,
+) -> ProxyResult {
+    headers.remove(ACCEPT_ENCODING);
+    let head = method == reqwest::Method::HEAD;
+    let request = if head {
+        client.head(url)
+    } else {
+        client.get(url)
+    };
+    let mut response = request
         .headers(headers)
         .send()
         .await
@@ -1057,11 +1166,13 @@ async fn fetch(client: reqwest::Client, url: url::Url, headers: HeaderMap) -> Pr
     let status = response.status();
     let headers = response.headers().clone();
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
-        if body.len() + chunk.len() > MAX_PROXY_BODY {
-            return Err(format!("response body exceeds {MAX_PROXY_BODY} bytes"));
+    if !head {
+        while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+            if body.len() + chunk.len() > MAX_PROXY_BODY {
+                return Err(format!("response body exceeds {MAX_PROXY_BODY} bytes"));
+            }
+            body.extend_from_slice(&chunk);
         }
-        body.extend_from_slice(&chunk);
     }
     Ok(ProxiedResponse {
         url,
@@ -1071,19 +1182,42 @@ async fn fetch(client: reqwest::Client, url: url::Url, headers: HeaderMap) -> Pr
     })
 }
 
-/// Servo stores cookies only from responses it fetched itself, so the cookies
-/// set by a proxied response are stored here.
-fn store_cookies(servo: &Servo, response: &ProxiedResponse) {
-    for value in response.headers.get_all(SET_COOKIE) {
-        let Ok(text) = value.to_str() else { continue };
-        if let Ok(cookie) = cookie::Cookie::parse(text.to_string()) {
-            servo.site_data_manager().set_cookie_for_url(
-                response.url.clone(),
-                cookie.into_owned(),
-                None,
-            );
+/// The `Set-Cookie` header values of a response, as text.
+fn set_cookie_values(headers: &HeaderMap) -> Vec<String> {
+    headers
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok().map(str::to_string))
+        .collect()
+}
+
+/// Store `set_cookies`, received from `url`, in Servo's jar. Servo stores only
+/// the responses it fetched itself, so the cookies of a proxied response are
+/// stored here. Must run on the render thread.
+fn store_set_cookies(servo: &Servo, url: &url::Url, set_cookies: &[String]) {
+    for text in set_cookies {
+        if let Ok(cookie) = cookie::Cookie::parse(text.clone()) {
+            servo
+                .site_data_manager()
+                .set_cookie_for_url(url.clone(), cookie.into_owned(), None);
         }
     }
+}
+
+/// The `Cookie` header for a request to `url` from Servo's jar, or `None` if
+/// the jar has no cookies for it. Must run on the render thread.
+fn cookie_header(servo: &Servo, url: &url::Url) -> Option<String> {
+    let cookies = servo
+        .site_data_manager()
+        .cookies_for_url(url.clone(), CookieSource::HTTP);
+    if cookies.is_empty() {
+        return None;
+    }
+    let pairs: Vec<String> = cookies
+        .iter()
+        .map(|c| format!("{}={}", c.name(), c.value()))
+        .collect();
+    Some(pairs.join("; "))
 }
 
 /// Forget everything earlier renders left behind: cookies, web storage and
@@ -1133,6 +1267,7 @@ fn render_one(
         for load in held {
             proxy.submit(servo, load);
         }
+        proxy.serve_cookies(servo);
         proxy.deliver_checks(servo);
         proxy.deliver_finished(servo);
 

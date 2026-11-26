@@ -40,7 +40,9 @@ url = "2"
 dpi = "0.1"
 cookie = "0.18"
 content-security-policy = "0.9"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider"] }
+# gzip, brotli, deflate and zstd: the proxied requests decode compressed bodies,
+# so the page never receives a body it cannot read.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "gzip", "brotli", "deflate", "zstd"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 thiserror = "2"
@@ -57,6 +59,7 @@ pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target
 pkg-fmt = "tgz"
 bin-dir = "{ bin }{ binary-ext }"
 
-# F7: only this crate's own tests turn the address-check bypass on.
+# Only this crate's own tests turn the address-check bypass on: the dev-dependency
+# enables the test-hooks feature for `cargo test`, and downstream users never see it.
 [dev-dependencies]
 cherrypi-fetch = { path = ".", features = ["test-hooks"] }
