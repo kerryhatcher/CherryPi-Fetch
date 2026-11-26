@@ -52,6 +52,22 @@ whole process and are fixed after the first render. After
 `render_page` must be called from within a Tokio runtime. Build with
 `default-features = false` to leave out the CLI's dependencies.
 
+## Building from source
+
+Servo needs a C/C++ toolchain, CMake, Clang and a GL stack. On Debian and
+Ubuntu, the packages CI installs on `ubuntu-24.04` are:
+
+```sh
+sudo apt-get install -y \
+    build-essential cmake pkg-config clang libclang-dev \
+    libfontconfig1-dev libegl1-mesa-dev libegl1 libgl1-mesa-dri \
+    fonts-dejavu-core
+```
+
+With those installed, `cargo build --release` and `cargo test` work. The
+render tests need a GL implementation; on a headless machine set
+`LIBGL_ALWAYS_SOFTWARE=1` so Mesa uses its software rasterizer.
+
 ## Why the default User-Agent claims Windows
 
 Some sites never answer requests from desktop Linux user agents. Simbli
