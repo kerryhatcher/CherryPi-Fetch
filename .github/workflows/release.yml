@@ -136,6 +136,15 @@ jobs:
         run: cargo publish --dry-run --locked
       - name: Build (release)
         run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Install cargo-about
+        uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2.90.11
+        with:
+          tool: cargo-about@0.9.3
+      - name: Generate third-party license notices
+        # The accepted list in about.toml stops the release when a dependency
+        # uses a license that has not been reviewed; --fail also fails on
+        # license expressions that cannot be read.
+        run: cargo about generate --locked --fail --config about.toml about-template.hbs -o THIRD_PARTY_LICENSES
       - name: Package
         env:
           VERSION: ${{ needs.verify.outputs.version }}
@@ -144,10 +153,10 @@ jobs:
           set -euo pipefail
           mkdir -p dist staging
           cp "target/${TARGET}/release/cherrypi-fetch" staging/
-          cp LICENSE README.md staging/
+          cp LICENSE README.md THIRD_PARTY_LICENSES staging/
           archive="cherrypi-fetch-${VERSION}-${TARGET}.tar.gz"
-          # The binary, LICENSE and README sit at the archive root.
-          COPYFILE_DISABLE=1 tar -czf "dist/${archive}" -C staging cherrypi-fetch LICENSE README.md
+          # The binary, LICENSE, README and third-party notices sit at the root.
+          COPYFILE_DISABLE=1 tar -czf "dist/${archive}" -C staging cherrypi-fetch LICENSE README.md THIRD_PARTY_LICENSES
           if command -v sha256sum >/dev/null 2>&1; then
             (cd dist && sha256sum "${archive}" > "${archive}.sha256")
           else
@@ -162,6 +171,7 @@ jobs:
           set -euo pipefail
           mkdir -p smoke
           tar -xzf "dist/cherrypi-fetch-${VERSION}-${TARGET}.tar.gz" -C smoke
+          test -s smoke/THIRD_PARTY_LICENSES
           ./smoke/cherrypi-fetch --version
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

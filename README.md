@@ -147,6 +147,9 @@ MPL-2.0 code. Each MPL-2.0 dependency's source is on crates.io at the version
 pinned in `Cargo.lock`; [`servo`](https://crates.io/crates/servo/0.8.0) itself
 is 0.8.0.
 
+Each release archive also contains a generated `THIRD_PARTY_LICENSES` file
+that lists every dependency and its license text.
+
 ## Differences from konippi/servo-fetch
 
 [konippi/servo-fetch](https://github.com/konippi/servo-fetch) is the existing

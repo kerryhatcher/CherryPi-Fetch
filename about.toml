@@ -1,0 +1,22 @@
+# cargo-about configuration for the release binaries.
+#
+# `targets` is the pair of targets the release publishes, so the notice lists
+# only the crates those binaries actually include. `accepted` is the set of
+# licenses those targets select (an OR expression counts as the branch
+# cargo-about picks); a dependency whose license is outside it stops the
+# release until it has been reviewed. release.yml generates
+# THIRD_PARTY_LICENSES from this file.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
+
+accepted = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]

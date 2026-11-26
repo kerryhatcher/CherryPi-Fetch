@@ -1,0 +1,25 @@
+Third-party licenses
+====================
+
+The release binaries include the third-party crates below. Each crate is
+listed with the license text its authors published.
+
+Licenses in use:
+
+{{#each overview}}
+  - {{{name}}} ({{count}} crates)
+{{/each}}
+
+{{#each licenses}}
+================================================================================
+{{{name}}}
+================================================================================
+
+Used by:
+
+{{#each used_by}}
+  - {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}
