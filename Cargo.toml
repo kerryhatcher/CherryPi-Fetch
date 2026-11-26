@@ -1,0 +1,48 @@
+[package]
+name = "cherrypi-fetch"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["CherryPi Contributors"]
+repository = "https://github.com/kerryhatcher/CherryPi-Fetch"
+homepage = "https://github.com/kerryhatcher/CherryPi-Fetch"
+readme = "README.md"
+description = "Render JavaScript-heavy web pages in Servo and return their visible text, as a library or a CLI"
+keywords = ["servo", "scraping", "headless", "spa", "mcp"]
+categories = ["command-line-utilities", "web-programming"]
+rust-version = "1.88.0"
+include = [
+    "src/**",
+    "tests/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+]
+
+[features]
+default = ["cli"]
+# The `cherrypi-fetch` command-line tool. Library users can turn it off.
+cli = ["dep:clap", "dep:serde", "dep:serde_json", "dep:tracing-subscriber"]
+
+[[bin]]
+name = "cherrypi-fetch"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[dependencies]
+servo = "=0.8.0"
+rustls = "0.23"
+url = "2"
+dpi = "0.1"
+cookie = "0.18"
+content-security-policy = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
