@@ -22,8 +22,9 @@ Initial release: the `cherrypi-fetch` library and CLI, moved out of CherryPi's
 - The renderer behaviour that lived in CherryPi:
   - same-origin GET requests from scripts (XHR and `fetch`) are proxied
     through `reqwest` with an 8-second timeout; other requests are left to
-    Servo, and a render that still stalls ends at its timeout and is marked
-    incomplete;
+    Servo. A render that still stalls ends at its timeout: it is returned as
+    incomplete if it captured some text, or fails (`ok:false`, exit 1) if it
+    captured none;
   - cookies, local and session storage and the HTTP cache are cleared before
     every render, so one bot block cannot poison the next;
   - a configurable User-Agent, defaulting to Windows Firefox, because some

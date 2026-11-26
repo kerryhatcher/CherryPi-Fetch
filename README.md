@@ -121,8 +121,9 @@ Some sites never answer requests from desktop Linux user agents. Simbli
 (eboardsolutions.com) was one in CherryPi: a page there waits forever on a
 synchronous request. To keep a page from stalling, the same-origin GET
 requests its scripts make (XHR and `fetch`) are proxied with an 8-second
-timeout. Other requests are left to Servo, and a render that still stalls ends
-at its timeout and is marked incomplete.
+timeout. Other requests are left to Servo. A render that still stalls ends at
+its timeout: if it captured some text it is returned as incomplete; if it
+captured no text, it fails (`ok:false`, exit 1).
 
 ## Limitations
 
@@ -130,6 +131,8 @@ at its timeout and is marked incomplete.
   address or a cloud metadata endpoint, and the page and its resources are
   fetched from it. Do not pass untrusted URLs from a network that has internal
   hosts. Tracked in
+  [#6](https://github.com/kerryhatcher/CherryPi-Fetch/issues/6).
+- **Credentials in URLs are not stripped.** Tracked in
   [#6](https://github.com/kerryhatcher/CherryPi-Fetch/issues/6).
 - **Not for CAPTCHA or login-walled pages.** A page that blocks automated
   browsers, or that needs a login, comes back blank or incomplete.
@@ -140,9 +143,9 @@ at its timeout and is marked incomplete.
 
 This project's own code is [MIT licensed](LICENSE). The release binaries link
 [Servo](https://servo.org) and other MPL-2.0 dependencies, so they include
-MPL-2.0 code. The Servo source in a release is the crates.io
-[servo 0.8.0](https://crates.io/crates/servo/0.8.0) release; the project is at
-<https://github.com/servo/servo>.
+MPL-2.0 code. Each MPL-2.0 dependency's source is on crates.io at the version
+pinned in `Cargo.lock`; [`servo`](https://crates.io/crates/servo/0.8.0) itself
+is 0.8.0.
 
 ## Differences from konippi/servo-fetch
 
@@ -151,8 +154,9 @@ project that owns the `servo-fetch` name on crates.io. It is a much larger
 tool: it renders to Markdown, JSON or PNG screenshots, crawls sites, maps
 URLs from sitemaps, and ships a Rust library, Python and Node.js SDKs, an MCP
 server and a Docker image. Its README also describes safety work this project
-does not do: it blocks private and reserved IP ranges, refuses local schemes
-and strips credentials from URLs.
+does not do: it blocks private and reserved IP ranges and strips credentials
+from URLs. The `cherrypi-fetch` CLI refuses URLs that are not http or https;
+the library does not check the scheme.
 
 `cherrypi-fetch` is deliberately smaller and focused on one job: return a
 page's title and visible text to a caller that may be an agent. Its behaviour
@@ -161,13 +165,14 @@ is built around pages that misbehave:
 - **A timeout on the page's own script requests.** The same-origin GET
   requests a page's scripts make (XHR and `fetch`) are proxied through
   `reqwest` with an 8-second timeout. konippi's README does not describe
-  this. Other requests are left to Servo, and a render that still stalls ends
-  at its timeout and is marked incomplete.
+  this. Other requests are left to Servo. A render that still stalls ends at
+  its timeout: if it captured some text it is returned as incomplete; if it
+  captured no text, it fails (`ok:false`, exit 1).
 - **A clean state for every render.** Cookies, local and session storage and
   the HTTP cache are cleared before each page, so a site that blocked one
-  visit does not poison the next. konippi describes a different mechanism, a
-  one-use worker process per session, and does not say how its default fetch
-  shares state.
+  visit does not poison the next. konippi's MCP section says its page tools
+  run in fresh workers with no cookies or storage carried between calls;
+  cherrypi-fetch also clears the HTTP cache before each render.
 - **A Windows Firefox User-Agent by default.** konippi exposes a user agent
   on its crawl options, but its README does not say what its default is.
 
