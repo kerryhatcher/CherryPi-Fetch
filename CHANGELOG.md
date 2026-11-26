@@ -9,6 +9,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - unreleased
+
+### Fixed
+
+- The proxy's script requests follow Servo and trust the system root store
+  (`rustls-tls-native-roots-no-provider`), and HTTP/2 is enabled. A page
+  behind a corporate or custom CA no longer renders incomplete because its
+  proxied requests fail TLS.
+
 ## [0.1.0] - 2026-11-26
 
 Initial release: the `cherrypi-fetch` library and CLI, moved out of CherryPi's
@@ -42,4 +51,5 @@ Initial release: the `cherrypi-fetch` library and CLI, moved out of CherryPi's
   when at least one failed (even if others were incomplete) or the arguments
   were bad, 2 when at least one was incomplete and none failed.
 
+[0.1.1]: https://github.com/kerryhatcher/CherryPi-Fetch/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kerryhatcher/CherryPi-Fetch/releases/tag/v0.1.0
