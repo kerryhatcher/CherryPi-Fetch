@@ -89,30 +89,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
-          sudo apt-get clean
-      - name: Install system packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential cmake pkg-config clang libclang-dev \
-            libfontconfig1-dev libegl1-mesa-dev libegl1 libgl1-mesa-dri \
-            fonts-dejavu-core
-      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
-        with:
-          # rust-toolchain.toml selects the toolchain; the cache is managed
-          # by Swatinem/rust-cache below.
-          cache: false
-          # The action defaults this to "deny", which turns Cargo's own
-          # manifest warnings (e.g. homepage == repository) into errors.
-          build-warnings: ""
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: ./.github/actions/setup
         with:
           shared-key: linux
-          cache-on-failure: true
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Clippy
@@ -134,14 +113,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
-        with:
-          cache: false
-          build-warnings: ""
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: ./.github/actions/setup
         with:
           shared-key: macos
-          cache-on-failure: true
       - name: Build and test
         run: cargo test --locked
 
