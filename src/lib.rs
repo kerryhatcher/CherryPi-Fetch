@@ -640,11 +640,14 @@ fn render_one(
             let snap = snapshot.borrow();
             if snap.samples > seen_samples {
                 seen_samples = snap.samples;
-                if last_text.as_deref() == Some(snap.text.as_str()) {
+                // Compare the sanitized text: a page that is only control
+                // characters has no text to settle on.
+                let sample = sanitize_control(&snap.text);
+                if last_text.as_deref() == Some(sample.as_str()) {
                     stable += 1;
                 } else {
                     stable = 0;
-                    last_text = Some(snap.text.clone());
+                    last_text = Some(sample);
                 }
             }
         }
@@ -706,7 +709,10 @@ fn render_one(
         ))
     };
     Ok(RenderedPage {
-        title: sanitize_control(&snap.title).trim().to_string(),
+        title: sanitize_control(&snap.title)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
         text,
         incomplete,
     })
@@ -721,11 +727,21 @@ fn normalize_text(text: &str) -> String {
         .join("\n")
 }
 
-/// Remove C0 and C1 control characters other than newline and tab, so a page
-/// cannot inject terminal escape sequences into a caller's output.
+/// Remove C0 and C1 control characters other than newline and tab, and the
+/// bidi overrides and isolates, so a page cannot inject terminal escapes or
+/// reorder terminal output. Vertical tab, form feed and NEL become spaces so
+/// they still separate words; carriage return is removed.
 fn sanitize_control(text: &str) -> String {
     text.chars()
-        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .filter_map(|c| match c {
+            '\n' | '\t' => Some(c),
+            // Keep word separators, so a page's layout does not glue words.
+            '\u{0b}' | '\u{0c}' | '\u{85}' => Some(' '),
+            // Bidi overrides and isolates can reorder a caller's output.
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => None,
+            _ if c.is_control() => None,
+            _ => Some(c),
+        })
         .collect()
 }
 
@@ -786,6 +802,12 @@ mod tests {
         document.title = 'esc' + esc + '[31mred' + esc + '[0m';\
         document.getElementById('out').textContent = 'a' + esc + '[2Jb' + esc + ']0;title' + bel + 'c' + csi + '31md';\
         </script></body></html>";
+
+    /// A page whose only text is an escape character.
+    const ONLY_ESCAPE: &str = "<html><head><title>Only esc</title></head><body>\
+        <div id='out'>x</div>\
+        <script>document.getElementById('out').textContent = String.fromCharCode(27);</script>\
+        </body></html>";
 
     /// Serve `page` at `/`. `/hang` never answers, and `/cookies` echoes the
     /// request's Cookie header and sets `server=2`.
@@ -938,6 +960,17 @@ mod tests {
             page.text
         );
 
+        // A page whose text sanitizes to nothing has no text to settle on, so
+        // it comes back incomplete instead of as an empty success.
+        let page = render_page(serve(ONLY_ESCAPE), Duration::from_secs(3))
+            .await
+            .expect("render should succeed");
+        assert_eq!(page.text, "");
+        assert!(
+            page.incomplete.is_some(),
+            "an ESC-only page should be incomplete: {page:?}"
+        );
+
         let url = url::Url::parse("http://127.0.0.1:9/").unwrap();
         for bad in [
             Duration::ZERO,
@@ -987,6 +1020,27 @@ mod tests {
             sanitize_control("a\u{1b}[31mb\u{9b}c\td\ne"),
             "a[31mbc\td\ne"
         );
-        assert_eq!(sanitize_control("no\u{0}controls\u{7f}"), "nocontrols");
+        // VT, FF and NEL separate words; CR is removed.
+        assert_eq!(sanitize_control("a\u{b}b\u{c}c\u{85}d"), "a b c d");
+        assert_eq!(sanitize_control("a\rb"), "ab");
+        // Bidi overrides and isolates are removed.
+        assert_eq!(sanitize_control("a\u{202e}b\u{2066}c"), "abc");
+        // Every other C0, DEL and C1 code point is removed.
+        for code in (0x00..=0x1f).chain(0x7f..=0x9f) {
+            let c = char::from_u32(code).unwrap();
+            if c == '\n' || c == '\t' {
+                continue;
+            }
+            let expected = match c {
+                '\u{b}' | '\u{c}' | '\u{85}' => "x y",
+                _ => "xy",
+            };
+            assert_eq!(sanitize_control(&format!("x{c}y")), expected, "{code:#x}");
+        }
+        // Non-ASCII text is untouched.
+        assert_eq!(
+            sanitize_control("a\u{a0}b\u{e9}c\u{3042}d"),
+            "a\u{a0}b\u{e9}c\u{3042}d"
+        );
     }
 }
