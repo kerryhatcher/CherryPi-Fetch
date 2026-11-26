@@ -167,11 +167,41 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
     if (s[0] & 0xffc0) == 0xfe80 {
         return false;
     }
-    // Documentation 2001:db8::/32.
-    if s[0] == 0x2001 && s[1] == 0x0db8 {
+    // Deprecated site-local fec0::/10.
+    if (s[0] & 0xffc0) == 0xfec0 {
+        return false;
+    }
+    // Documentation 2001:db8::/32 and Teredo 2001::/32.
+    if s[0] == 0x2001 && (s[1] == 0x0db8 || s[1] == 0x0000) {
+        return false;
+    }
+    // 6to4 2002::/16 embeds an IPv4 address.
+    if s[0] == 0x2002 {
+        return is_public_ipv4(embedded_ipv4(s[1], s[2]));
+    }
+    // NAT64 64:ff9b::/96 embeds an IPv4 address; 64:ff9b:1::/48 is local-use.
+    if s[0] == 0x0064 && s[1] == 0xff9b {
+        if s[2] == 0x0001 {
+            return false;
+        }
+        if s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0 {
+            return is_public_ipv4(embedded_ipv4(s[6], s[7]));
+        }
+    }
+    // IPv4-compatible ::/96.
+    if s[0..6].iter().all(|&x| x == 0) {
+        return false;
+    }
+    // Discard 100::/64.
+    if s[0] == 0x0100 && s[1] == 0 && s[2] == 0 && s[3] == 0 {
         return false;
     }
     true
+}
+
+/// The IPv4 address stored in two IPv6 groups.
+fn embedded_ipv4(high: u16, low: u16) -> Ipv4Addr {
+    Ipv4Addr::new((high >> 8) as u8, high as u8, (low >> 8) as u8, low as u8)
 }
 
 /// Parse a host as an IP literal, including a bracketed IPv6 literal.
@@ -203,11 +233,39 @@ async fn resolve_addresses(host: &str, port: u16) -> Result<Vec<IpAddr>, String>
     }
 }
 
-/// Refuse a URL whose host resolves to a non-public address. A URL without a
-/// host, such as a `data:` URL, is allowed.
-async fn check_destination(url: &url::Url) -> Result<(), String> {
+/// Schemes that carry their own content and make no network request.
+fn is_opaque_scheme(scheme: &str) -> bool {
+    matches!(scheme, "data" | "blob" | "about")
+}
+
+/// Refuse a URL whose scheme is not http(s) or a source of local content, so
+/// `file:` and friends are never fetched.
+fn check_scheme(url: &url::Url) -> Result<(), String> {
+    match url.scheme() {
+        "http" | "https" => Ok(()),
+        scheme if is_opaque_scheme(scheme) => Ok(()),
+        scheme => Err(format!(
+            "refusing a {scheme}: URL: only http and https are allowed"
+        )),
+    }
+}
+
+/// The first proxy environment variable that is set, if any. Servo's own
+/// network stack honours these too, so they move requests off the checked path.
+fn proxy_environment_variable() -> Option<String> {
+    std::env::vars().find_map(|(name, value)| {
+        let upper = name.to_ascii_uppercase();
+        (matches!(upper.as_str(), "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY") && !value.is_empty())
+            .then_some(name)
+    })
+}
+
+/// Refuse a URL whose host is not public, and return the addresses it
+/// resolved to. A URL with no host, such as a `data:` URL, resolves to nothing.
+async fn check_destination(url: &url::Url) -> Result<Vec<IpAddr>, String> {
+    check_scheme(url)?;
     let Some(host) = url.host_str() else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let port = url.port_or_known_default().unwrap_or(0);
     let ips = resolve_addresses(host, port).await?;
@@ -217,7 +275,7 @@ async fn check_destination(url: &url::Url) -> Result<(), String> {
              otherwise not a public destination"
         ));
     }
-    Ok(())
+    Ok(ips)
 }
 
 /// Remove `user:pass@` from a URL, so credentials are never sent to a host.
@@ -341,9 +399,25 @@ pub async fn render_page(url: url::Url, timeout: Duration) -> Result<RenderedPag
         return Err(RenderError::InvalidTimeout);
     }
     let url = strip_userinfo(url);
+    if let Err(e) = check_scheme(&url) {
+        return Err(RenderError::Failed(e));
+    }
     if !allow_private_networks() {
-        if let Err(e) = check_destination(&url).await {
-            return Err(RenderError::Failed(e));
+        if let Some(name) = proxy_environment_variable() {
+            return Err(RenderError::Failed(format!(
+                "{name} is set, so requests could go through an un-checked proxy; unset it or \
+                 allow private networks for local testing"
+            )));
+        }
+        match tokio::time::timeout(timeout, check_destination(&url)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(RenderError::Failed(e)),
+            Err(_) => {
+                return Err(RenderError::Failed(format!(
+                    "timed out checking the address of {}",
+                    url.host_str().unwrap_or("the URL")
+                )));
+            }
         }
     }
     let runtime = tokio::runtime::Handle::current();
@@ -508,17 +582,18 @@ struct ProxiedResponse {
 
 type ProxyResult = Result<ProxiedResponse, String>;
 
-/// A reqwest redirect policy that refuses to follow a redirect into a private
-/// address or to a different host. Only the first hop was checked, so only
-/// same-host redirects are followed.
+/// A reqwest redirect policy that turns a redirect into a private address or
+/// to a different host into an error, instead of following it or handing the
+/// 3xx back to the page. Only the first hop was checked, so only same-host
+/// redirects are followed.
 fn redirect_policy(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Action {
     let host = attempt.url().host_str().unwrap_or_default().to_string();
     if host.is_empty() {
-        return attempt.stop();
+        return attempt.error("refusing a redirect with no host");
     }
     if let Some(ip) = parse_ip_literal(&host) {
         if !is_public_address(ip) {
-            return attempt.stop();
+            return attempt.error("refusing a redirect to a non-public address");
         }
     }
     let first_host = attempt
@@ -528,14 +603,13 @@ fn redirect_policy(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Ac
         .unwrap_or_default()
         .to_string();
     if first_host != host {
-        return attempt.stop();
+        return attempt.error("refusing a redirect to a different host");
     }
     attempt.follow()
 }
 
 /// Requests made on the page's behalf that have not been answered yet.
 struct Proxy {
-    client: reqwest::Client,
     runtime: tokio::runtime::Handle,
     allow_private: bool,
     next_id: u64,
@@ -545,8 +619,8 @@ struct Proxy {
     in_flight: HashMap<u64, WebResourceLoad>,
     /// When a request last started or finished.
     last_activity: Option<Instant>,
-    check_tx: mpsc::Sender<(u64, Result<(), String>)>,
-    check_rx: mpsc::Receiver<(u64, Result<(), String>)>,
+    check_tx: mpsc::Sender<(u64, Result<Vec<IpAddr>, String>)>,
+    check_rx: mpsc::Receiver<(u64, Result<Vec<IpAddr>, String>)>,
     done_tx: mpsc::Sender<(u64, ProxyResult)>,
     done_rx: mpsc::Receiver<(u64, ProxyResult)>,
 }
@@ -555,14 +629,7 @@ impl Proxy {
     fn new(runtime: tokio::runtime::Handle, allow_private: bool) -> Self {
         let (done_tx, done_rx) = mpsc::channel();
         let (check_tx, check_rx) = mpsc::channel();
-        let client = reqwest::Client::builder()
-            .user_agent(user_agent())
-            .timeout(REQUEST_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::custom(redirect_policy))
-            .build()
-            .unwrap_or_default();
         Self {
-            client,
             runtime,
             allow_private,
             next_id: 0,
@@ -588,18 +655,31 @@ impl Proxy {
 
     /// Check a load's destination, then proxy it or hand it back to Servo.
     fn submit(&mut self, servo: &Servo, load: WebResourceLoad) {
-        if self.allow_private {
-            self.dispatch(servo, load);
+        let url = load.request.url.clone().into_url();
+        // Only http(s), data, blob and about are ever allowed; anything else
+        // is refused before Servo can fetch it.
+        if let Err(e) = check_scheme(&url) {
+            tracing::debug!(host = %url.host_str().unwrap_or_default(), error = %e, "blocked a non-http scheme");
+            cancel_load(load);
             return;
         }
-        let url = load.request.url.clone().into_url();
+        if self.allow_private {
+            self.dispatch(servo, load, &[]);
+            return;
+        }
         let id = self.next_id;
         self.next_id += 1;
         self.checking.insert(id, load);
         self.last_activity = Some(Instant::now());
+        let host = url.host_str().unwrap_or_default().to_string();
         let tx = self.check_tx.clone();
         self.runtime.spawn(async move {
-            let _ = tx.send((id, check_destination(&url).await));
+            let result = match tokio::time::timeout(REQUEST_TIMEOUT, check_destination(&url)).await
+            {
+                Ok(result) => result,
+                Err(_) => Err(format!("timed out checking {host}")),
+            };
+            let _ = tx.send((id, result));
         });
     }
 
@@ -612,11 +692,10 @@ impl Proxy {
             };
             self.last_activity = Some(Instant::now());
             match result {
-                Ok(()) => self.dispatch(servo, load),
+                Ok(addrs) => self.dispatch(servo, load, &addrs),
                 Err(e) => {
-                    tracing::debug!(url = %load.request.url, error = %e, "blocked a non-public request");
-                    let url = load.request.url.clone().into_url();
-                    load.intercept(WebResourceResponse::new(url)).cancel();
+                    tracing::debug!(host = %load.request.url.as_url().host_str().unwrap_or_default(), error = %e, "blocked a non-public request");
+                    cancel_load(load);
                 }
             }
         }
@@ -624,7 +703,7 @@ impl Proxy {
 
     /// Make the request here when it is a same-origin script GET, otherwise
     /// drop the load and let Servo make it.
-    fn dispatch(&mut self, servo: &Servo, load: WebResourceLoad) {
+    fn dispatch(&mut self, servo: &Servo, load: WebResourceLoad, addrs: &[IpAddr]) {
         let request = &load.request;
         if should_proxy(
             request.destination,
@@ -632,14 +711,14 @@ impl Proxy {
             request.url.as_url(),
             request.referrer_url.as_ref().map(|u| u.as_url()),
         ) {
-            self.start(servo, load);
+            self.start(servo, load, addrs);
         }
     }
 
     /// Start a request for `load` with the cookies Servo holds for its URL.
-    fn start(&mut self, servo: &Servo, load: WebResourceLoad) {
+    fn start(&mut self, servo: &Servo, load: WebResourceLoad, addrs: &[IpAddr]) {
         let request = &load.request;
-        let url = request.url.clone().into_url();
+        let url = strip_userinfo(request.url.clone().into_url());
         let mut headers = request.headers.clone();
         let cookies = servo
             .site_data_manager()
@@ -662,11 +741,18 @@ impl Proxy {
             headers.insert(UA_HEADER, value);
         }
 
+        let client = match pinned_client(&url, addrs) {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::debug!(host = %url.host_str().unwrap_or_default(), error = %e, "blocked a request");
+                cancel_load(load);
+                return;
+            }
+        };
         let id = self.next_id;
         self.next_id += 1;
         self.in_flight.insert(id, load);
         self.last_activity = Some(Instant::now());
-        let client = self.client.clone();
         let done = self.done_tx.clone();
         self.runtime.spawn(async move {
             let result = tokio::time::timeout(REQUEST_TIMEOUT, fetch(client, url, headers))
@@ -679,6 +765,17 @@ impl Proxy {
                 });
             let _ = done.send((id, result));
         });
+    }
+
+    /// Cancel every load that is still waiting, so none is dropped and
+    /// released to Servo without a decision.
+    fn cancel_all(&mut self) {
+        for (_, load) in self.checking.drain() {
+            cancel_load(load);
+        }
+        for (_, load) in self.in_flight.drain() {
+            cancel_load(load);
+        }
     }
 
     /// Hand finished requests back to Servo. A failed request becomes a
@@ -714,13 +811,42 @@ impl Proxy {
                     intercepted.finish();
                 }
                 Err(e) => {
-                    tracing::debug!(url = %load.request.url, error = %e, "page request failed");
-                    let url = load.request.url.clone().into_url();
-                    load.intercept(WebResourceResponse::new(url)).cancel();
+                    tracing::debug!(host = %load.request.url.as_url().host_str().unwrap_or_default(), error = %e, "page request failed");
+                    cancel_load(load);
                 }
             }
         }
     }
+}
+
+/// Build the client for one proxied request, pinned to the addresses the
+/// check resolved so a second answer cannot move the connection to a private
+/// host.
+fn pinned_client(url: &url::Url, addrs: &[IpAddr]) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent(user_agent())
+        .timeout(REQUEST_TIMEOUT)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::custom(redirect_policy));
+    if let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) {
+        let sockets: Vec<std::net::SocketAddr> = addrs
+            .iter()
+            .map(|ip| std::net::SocketAddr::new(*ip, port))
+            .collect();
+        if !sockets.is_empty() {
+            builder = builder.resolve_to_addrs(host, &sockets);
+        }
+    }
+    builder
+        .build()
+        .map_err(|e| format!("could not build the proxy client: {e}"))
+}
+
+/// Cancel a load that was not allowed to proceed. Dropping one instead would
+/// let Servo fetch it without a check.
+fn cancel_load(load: WebResourceLoad) {
+    let url = load.request.url.clone().into_url();
+    load.intercept(WebResourceResponse::new(url)).cancel();
 }
 
 async fn fetch(client: reqwest::Client, url: url::Url, headers: HeaderMap) -> ProxyResult {
@@ -895,6 +1021,8 @@ fn render_one(
         && last_sample.is_some_and(|sent| Instant::now().duration_since(sent) >= STALL_AFTER);
     let secs = job.timeout.as_secs();
     if snap.samples == 0 {
+        drop(snap);
+        cancel_pending(&mut proxy, &delegate);
         return Err(if stalled {
             format!("page scripts stopped responding before any text could be read (waited {secs} seconds)")
         } else {
@@ -929,14 +1057,27 @@ fn render_one(
             "the page was still changing after {secs} seconds. Some content may be missing."
         ))
     };
+    let title = sanitize_control(&snap.title)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    drop(snap);
+    cancel_pending(&mut proxy, &delegate);
     Ok(RenderedPage {
-        title: sanitize_control(&snap.title)
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" "),
+        title,
         text,
         incomplete,
     })
+}
+
+/// Cancel every load that is still waiting, in the proxy and in the delegate,
+/// so none is dropped and released to Servo without a decision.
+fn cancel_pending(proxy: &mut Proxy, delegate: &PageDelegate) {
+    proxy.cancel_all();
+    let held: Vec<WebResourceLoad> = delegate.held.borrow_mut().drain(..).collect();
+    for load in held {
+        cancel_load(load);
+    }
 }
 
 /// Collapse whitespace within each line and drop empty lines.
@@ -1030,6 +1171,17 @@ mod tests {
         <script>document.getElementById('out').textContent = String.fromCharCode(27);</script>\
         </body></html>";
 
+    /// A page whose same-origin XHR is redirected to a private address.
+    const REDIRECT: &str = "<html><head><title>Redirect</title></head><body>\
+        <div id=\"out\">before</div>\
+        <script>\
+        var x = new XMLHttpRequest();\
+        x.open('GET', '/redirect', true);\
+        x.onload = function () { document.getElementById('out').textContent = 'redirect-followed'; };\
+        x.onerror = function () { document.getElementById('out').textContent = 'redirect-blocked'; };\
+        x.send();\
+        </script></body></html>";
+
     /// Serve `page` at `/`. `/hang` never answers, and `/cookies` echoes the
     /// request's Cookie header and sets `server=2`.
     fn serve(page: &'static str) -> url::Url {
@@ -1060,16 +1212,28 @@ mod tests {
             }
         }
         let path = request_line.split_whitespace().nth(1).unwrap_or("/");
-        let (content_type, extra, body) = match path {
+        let (status, content_type, extra, body) = match path {
             "/hang" => {
                 thread::sleep(Duration::from_secs(600));
                 return;
             }
-            "/cookies" => ("text/plain", "Set-Cookie: server=2; Path=/\r\n", cookies),
-            _ => ("text/html; charset=utf-8", "", page.to_string()),
+            "/cookies" => (
+                "200 OK",
+                "text/plain",
+                "Set-Cookie: server=2; Path=/\r\n",
+                cookies,
+            ),
+            // Redirects to a private address, which the proxy must refuse.
+            "/redirect" => (
+                "302 Found",
+                "text/plain",
+                "Location: http://127.0.0.1:1/\r\n",
+                String::new(),
+            ),
+            _ => ("200 OK", "text/html; charset=utf-8", "", page.to_string()),
         };
         let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{extra}\
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{extra}\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
@@ -1195,6 +1359,17 @@ mod tests {
             "an ESC-only page should be incomplete: {page:?}"
         );
 
+        // A same-origin script GET that redirects to a private address is
+        // refused.
+        let page = render_page(serve(REDIRECT), Duration::from_secs(20))
+            .await
+            .expect("render should succeed");
+        assert!(
+            page.text.contains("redirect-blocked"),
+            "text was: {:?}",
+            page.text
+        );
+
         let url = url::Url::parse("http://127.0.0.1:9/").unwrap();
         for bad in [
             Duration::ZERO,
@@ -1234,6 +1409,32 @@ mod tests {
     }
 
     #[test]
+    fn allows_only_http_and_opaque_schemes() {
+        for url in [
+            "http://example.com/",
+            "https://example.com/",
+            "data:text/plain,hi",
+            "blob:https://example.com/x",
+            "about:blank",
+        ] {
+            assert!(
+                check_scheme(&url::Url::parse(url).unwrap()).is_ok(),
+                "{url} should be allowed"
+            );
+        }
+        for url in [
+            "file:///etc/passwd",
+            "ftp://example.com/",
+            "ws://example.com/",
+        ] {
+            assert!(
+                check_scheme(&url::Url::parse(url).unwrap()).is_err(),
+                "{url} should be refused"
+            );
+        }
+    }
+
+    #[test]
     fn normalizes_text_lines() {
         assert_eq!(normalize_text("  a   b \n\n \t\n c\n"), "a b\nc");
     }
@@ -1257,6 +1458,9 @@ mod tests {
             "8.8.8.8",
             "172.32.0.1",
             "2606:4700:4700::1111",
+            // NAT64 and 6to4 addresses embedding a public IPv4 are public.
+            "64:ff9b::8.8.8.8",
+            "2002:0808:0808::",
         ] {
             assert!(
                 is_public_address(addr.parse().unwrap()),
@@ -1291,6 +1495,14 @@ mod tests {
             "::ffff:127.0.0.1",
             "::ffff:10.0.0.1",
             "::ffff:169.254.169.254",
+            // IPv6 transition and other reserved forms.
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b:1::1",
+            "2002:c0a8:101::",
+            "2001::1",
+            "fec0::1",
+            "::7f00:1",
+            "100::1",
         ] {
             assert!(
                 !is_public_address(addr.parse().unwrap()),

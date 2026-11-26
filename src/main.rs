@@ -121,7 +121,7 @@ async fn main() -> ExitCode {
                     .map_err(|e| e.to_string());
                 (result, display)
             }
-            Err(e) => (Err(e), raw.to_string()),
+            Err(e) => (Err(e), redact_url(raw)),
         };
         let record = to_record(&display, result, args.max_chars, started.elapsed());
         let outcome = if !record.ok {
@@ -178,6 +178,23 @@ fn parse_url(raw: &str) -> Result<url::Url, String> {
         let _ = url.set_password(None);
     }
     Ok(url)
+}
+
+/// Redact any userinfo from a URL for display. A URL that cannot be parsed is
+/// shown as a placeholder, so its credentials never appear in output.
+fn redact_url(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(mut url) => {
+            if !url.username().is_empty() {
+                let _ = url.set_username("");
+            }
+            if url.password().is_some() {
+                let _ = url.set_password(None);
+            }
+            url.to_string()
+        }
+        Err(_) => "<unparsable URL>".to_string(),
+    }
 }
 
 fn to_record(

@@ -1,6 +1,6 @@
-//! A resource load that points at a private address is blocked, even when the
-//! top-level page itself is allowed.
-#![cfg(feature = "cli")]
+//! SSRF guard: a private subresource is blocked and a non-http top-level
+//! scheme is refused. The positive control lives in `tests/ssrf_positive.rs`,
+//! because `configure` is process-wide.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -62,24 +62,28 @@ fn base64(data: &[u8]) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn blocks_a_subresource_to_a_private_address() {
+async fn blocks_private_and_non_http_destinations() {
     configure(RendererConfig {
         user_agent: "ssrf-test/1.0".into(),
         allow_private_networks: false,
     })
     .unwrap();
 
+    // A non-http top-level scheme is refused before the renderer starts.
+    let file = url::Url::parse("file:///etc/hostname").unwrap();
+    let result = render_page(file, Duration::from_secs(5)).await;
+    assert!(result.is_err(), "file: should be refused: {result:?}");
+
+    // A private subresource is blocked. A `data:` page has no host, so the
+    // top-level check lets it through; its only resource points at loopback.
     let (secret, hits) = counting_server();
-    // A `data:` page has no host, so the top-level check lets it through. Its
-    // only resource points at the loopback server.
     let html = format!("<html><body>hello<img src=\"{secret}\"></body></html>");
-    let url = url::Url::parse(&format!(
+    let page_url = url::Url::parse(&format!(
         "data:text/html;base64,{}",
         base64(html.as_bytes())
     ))
     .unwrap();
-
-    let page = render_page(url, Duration::from_secs(10))
+    let page = render_page(page_url, Duration::from_secs(10))
         .await
         .expect("the data: page should render");
     assert!(page.text.contains("hello"), "text was: {:?}", page.text);
@@ -90,6 +94,37 @@ async fn blocks_a_subresource_to_a_private_address() {
         hits.load(Ordering::SeqCst),
         0,
         "the private subresource was fetched"
+    );
+
+    // A dedicated worker's fetch. The worker posts back first so the test
+    // knows it ran; then its fetch to loopback must also be blocked.
+    let (worker_secret, worker_hits) = counting_server();
+    let worker_html = format!(
+        "<html><body><div id='out'>no worker</div>\
+         <script>\
+         var blob = new Blob(['postMessage(\"ran\"); fetch(\"{worker_secret}\")'], {{type: 'text/javascript'}});\
+         var w = new Worker(URL.createObjectURL(blob));\
+         w.onmessage = function (e) {{ document.getElementById('out').textContent = 'worker-' + e.data; }};\
+         </script></body></html>"
+    );
+    let worker_url = url::Url::parse(&format!(
+        "data:text/html;base64,{}",
+        base64(worker_html.as_bytes())
+    ))
+    .unwrap();
+    let page = render_page(worker_url, Duration::from_secs(10))
+        .await
+        .expect("the worker page should render");
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        page.text.contains("worker-ran"),
+        "the worker did not run, so the test would be vacuous: {:?}",
+        page.text
+    );
+    assert_eq!(
+        worker_hits.load(Ordering::SeqCst),
+        0,
+        "a worker fetch reached a private address"
     );
 
     shutdown_renderer();

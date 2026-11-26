@@ -11,12 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `RendererConfig` gained an `allow_private_networks` field, so a struct
+  literal needs updating; `RendererConfig::default()` is unchanged.
+
 ### Added
 
 - Private, loopback and link-local destinations are refused by default, for
-  the page, every resource it loads and every redirect, after DNS resolution;
-  `user:pass@` is stripped from URLs. `--allow-private` and
-  `RendererConfig::allow_private_networks` opt out for local testing.
+  the page, every resource it loads and every redirect, after DNS resolution.
+  Only `http` and `https` are fetched (`data`, `blob` and `about` are allowed
+  locally; other schemes, including `file:`, are refused). Proxy environment
+  variables are refused, and `user:pass@` is stripped from URLs.
+  `--allow-private` and `RendererConfig::allow_private_networks` opt out for
+  local testing.
+- Requests this crate makes itself are pinned to the addresses that were
+  checked, so a second DNS answer cannot move the connection.
 
 ## [0.1.0] - 2026-11-26
 

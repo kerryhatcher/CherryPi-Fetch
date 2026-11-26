@@ -128,15 +128,24 @@ captured no text, it fails (`ok:false`, exit 1).
 
 ## Limitations
 
-- **Private addresses are refused by default.** The page, every resource it
-  loads and every redirect must resolve to a public address. Loopback, private
-  and link-local addresses (including cloud metadata services such as
-  169.254.169.254) are blocked, and `user:pass@` is stripped from URLs. Use
-  `--allow-private` (or `RendererConfig::allow_private_networks`) only for
-  local testing.
-- **DNS rebinding is not closed.** A host is resolved and checked once, and
-  Servo resolves it again when it connects, so a server that changes its
-  answer between the two can swap a public address for a private one.
+- **Private addresses are refused by default.** Only `http` and `https` are
+  fetched (`data`, `blob` and `about` are allowed locally; everything else,
+  including `file:`, is refused). The page, every resource it loads and every
+  redirect must resolve to a public address. Loopback, private and link-local
+  addresses (including cloud metadata services such as 169.254.169.254) are
+  blocked, and `user:pass@` is stripped from URLs. Use `--allow-private` (or
+  `RendererConfig::allow_private_networks`) only for local testing.
+- **DNS rebinding is only partly closed.** Requests this crate makes itself
+  are pinned to the addresses that were checked. The ones Servo makes are
+  resolved again when it connects, so a server that changes its answer
+  between the check and the connect can swap a public address for a private
+  one.
+- **HTTP proxies are refused.** If `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY`
+  is set, the render fails unless private networks are allowed, because Servo
+  would send the request through the proxy instead of the checked path.
+- **Dedicated worker fetches are covered; service workers are untested.** A
+  `data:` page can start a dedicated worker (there is a test), but it cannot
+  register a service worker, so that path is unverified.
 - **Not for CAPTCHA or login-walled pages.** A page that blocks automated
   browsers, or that needs a login, comes back blank or incomplete.
 - **Prebuilt archives are only published for x86_64 Linux (glibc 2.39+) and

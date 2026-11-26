@@ -107,6 +107,22 @@ fn blocks_private_addresses_by_default() {
 }
 
 #[test]
+fn does_not_echo_credentials_for_rejected_urls() {
+    for url in [
+        "ftp://probeuser:probesecret@example.com/",
+        "http://probeuser:probesecret@[bad/",
+    ] {
+        let output = cherrypi_fetch().args(["--json", url]).output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stdout.contains("probesecret") && !stderr.contains("probesecret"),
+            "credentials leaked for {url}: {stdout} {stderr}"
+        );
+    }
+}
+
+#[test]
 fn rejects_an_invalid_user_agent() {
     let output = cherrypi_fetch()
         .args(["--user-agent", "", "http://127.0.0.1:9/"])
