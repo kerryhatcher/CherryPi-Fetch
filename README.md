@@ -1,7 +1,7 @@
 # cherrypi-fetch
 
-A tool that humans and agents can use to fetch data from any webpage, even
-SPAs. It renders JavaScript-heavy pages in [Servo](https://servo.org) and
+A tool that humans and agents can use to fetch data from most public pages,
+even SPAs. It renders JavaScript-heavy pages in [Servo](https://servo.org) and
 returns their title and visible text, as a library or a command-line tool. No
 Chrome, Chromium or V8 is involved. Originally for the CherryPi AI agent
 harness.
@@ -14,8 +14,9 @@ cargo install cherrypi-fetch    # build from source
 ```
 
 `cargo binstall` needs [cargo-binstall](https://github.com/cargo-bins/cargo-binstall)
-and fetches the prebuilt archive from the GitHub release. The first
-`cargo install` builds Servo, so it needs the
+and fetches the prebuilt archive from the GitHub release. Prebuilt archives
+exist for x86_64 Linux (glibc) and Apple-silicon macOS only; other targets
+fall back to a source build, which needs the
 [system packages](#building-from-source).
 
 Or download the archive for your platform from the
@@ -60,10 +61,12 @@ Each `--json` record looks like this:
 ```
 
 `incomplete` says why when a page did not settle in time; its text is then the
-last snapshot taken. `error` is set when `ok` is false.
+last snapshot taken. A failed record has `ok:false`, with `title` and `text`
+`null` and the reason in `error`.
 
-**Exit status:** 0 when every page rendered fully, 2 when at least one was
-incomplete, 1 when at least one failed or the arguments were bad.
+**Exit status:** 0 when every page rendered fully; 1 when at least one failed
+(even if others were incomplete) or the arguments were bad; 2 when at least
+one was incomplete and none failed.
 
 ## Library
 
@@ -94,32 +97,51 @@ Servo needs a C/C++ toolchain, CMake, Clang and a GL stack. On Debian and
 Ubuntu, the packages CI installs on `ubuntu-24.04` are:
 
 ```sh
+sudo apt-get update
 sudo apt-get install -y \
     build-essential cmake pkg-config clang libclang-dev \
     libfontconfig1-dev libegl1-mesa-dev libegl1 libgl1-mesa-dri \
     fonts-dejavu-core
 ```
 
-On macOS, the Xcode Command Line Tools are enough; CI installs nothing else.
+On macOS, install the Xcode Command Line Tools and CMake
+(`brew install cmake`). CI's macOS job installs nothing beyond the Rust
+toolchain, because the runner image already includes its build tools.
 
-With those installed, `cargo fmt`, `cargo clippy`, `cargo test` and
-`cargo build --no-default-features` work (the same checks CI runs). The
-render tests need a GL implementation; on a headless machine set
+With those installed, `cargo fmt --check`,
+`cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`,
+`cargo build --no-default-features --locked` and
+`cargo publish --dry-run --locked` work (the same checks CI runs). The render
+tests need a GL implementation; on a headless machine set
 `LIBGL_ALWAYS_SOFTWARE=1` so Mesa uses its software rasterizer.
 
 ## Why the default User-Agent claims Windows
 
 Some sites never answer requests from desktop Linux user agents. Simbli
-(eboardsolutions.com) is one: a page there waits forever on a synchronous
-request. To keep such a page from hanging the render, the page's same-origin
-script requests are made with an 8-second timeout.
+(eboardsolutions.com) was one in CherryPi: a page there waits forever on a
+synchronous request. To keep a page from stalling, the same-origin GET
+requests its scripts make (XHR and `fetch`) are proxied with an 8-second
+timeout. Other requests are left to Servo, and a render that still stalls ends
+at its timeout and is marked incomplete.
+
+## Limitations
+
+- **No private-address blocking.** A URL can point at localhost, a private
+  address or a cloud metadata endpoint, and the page and its resources are
+  fetched from it. Do not pass untrusted URLs from a network that has internal
+  hosts. Tracked in
+  [#6](https://github.com/kerryhatcher/CherryPi-Fetch/issues/6).
+- **Not for CAPTCHA or login-walled pages.** A page that blocks automated
+  browsers, or that needs a login, comes back blank or incomplete.
+- **Prebuilt archives are only published for x86_64 Linux (glibc 2.39+) and
+  Apple-silicon macOS.** Every other target builds from source.
 
 ## Licensing
 
-This project's own code is [MIT licensed](LICENSE). It links the
-[Servo](https://servo.org) browser engine, which is licensed under the
-[Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/), so the
-release binaries include MPL-2.0 code. Servo's source is available at
+This project's own code is [MIT licensed](LICENSE). The release binaries link
+[Servo](https://servo.org) and other MPL-2.0 dependencies, so they include
+MPL-2.0 code. The Servo source in a release is the crates.io
+[servo 0.8.0](https://crates.io/crates/servo/0.8.0) release; the project is at
 <https://github.com/servo/servo>.
 
 ## Differences from konippi/servo-fetch
@@ -128,20 +150,26 @@ release binaries include MPL-2.0 code. Servo's source is available at
 project that owns the `servo-fetch` name on crates.io. It is a much larger
 tool: it renders to Markdown, JSON or PNG screenshots, crawls sites, maps
 URLs from sitemaps, and ships a Rust library, Python and Node.js SDKs, an MCP
-server and a Docker image.
+server and a Docker image. Its README also describes safety work this project
+does not do: it blocks private and reserved IP ranges, refuses local schemes
+and strips credentials from URLs.
 
 `cherrypi-fetch` is deliberately smaller and focused on one job: return a
 page's title and visible text to a caller that may be an agent. Its behaviour
 is built around pages that misbehave:
 
-- **A timeout on the page's own synchronous requests.** Same-origin script
-  requests are proxied through `reqwest` with an 8-second timeout, so a page
-  that waits on a request that never answers cannot hang the render.
+- **A timeout on the page's own script requests.** The same-origin GET
+  requests a page's scripts make (XHR and `fetch`) are proxied through
+  `reqwest` with an 8-second timeout. konippi's README does not describe
+  this. Other requests are left to Servo, and a render that still stalls ends
+  at its timeout and is marked incomplete.
 - **A clean state for every render.** Cookies, local and session storage and
   the HTTP cache are cleared before each page, so a site that blocked one
-  visit does not poison the next.
-- **A configurable User-Agent**, with a Windows Firefox default, because some
-  sites never answer a desktop Linux user agent.
+  visit does not poison the next. konippi describes a different mechanism, a
+  one-use worker process per session, and does not say how its default fetch
+  shares state.
+- **A Windows Firefox User-Agent by default.** konippi exposes a user agent
+  on its crawl options, but its README does not say what its default is.
 
 It returns text (and a JSON record with `--json`), not Markdown, a screenshot
 or a schema, and it does not crawl.
