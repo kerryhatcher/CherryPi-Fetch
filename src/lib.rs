@@ -724,39 +724,6 @@ impl CookieLink {
     }
 }
 
-/// Whether a redirect from `from_host` to `next` is allowed. Pure, so the
-/// policy can be unit-tested in default mode.
-fn redirect_decision(from_host: &str, next: &url::Url, allow_private: bool) -> Result<(), String> {
-    let Some(host) = next.host_str() else {
-        return Err("a redirect with no host".to_string());
-    };
-    if let Some(ip) = parse_ip_literal(host) {
-        if !allow_private && !is_public_address(ip) {
-            return Err("a redirect to a non-public address".to_string());
-        }
-    }
-    let _ = from_host;
-    Ok(())
-}
-
-/// A reqwest redirect policy that turns a redirect into a private address or
-/// to a different host into an error, instead of following it or handing the
-/// 3xx back to the page. Only the first hop was checked, so only same-host
-/// redirects are followed.
-fn redirect_policy(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Action {
-    let from_host = attempt
-        .previous()
-        .first()
-        .and_then(|first| first.host_str())
-        .unwrap_or_default()
-        .to_string();
-    let next = attempt.url().clone();
-    match redirect_decision(&from_host, &next, allow_private_networks()) {
-        Ok(()) => attempt.follow(),
-        Err(e) => attempt.error(e),
-    }
-}
-
 /// Requests made on the page's behalf that have not been answered yet.
 struct Proxy {
     runtime: tokio::runtime::Handle,
@@ -813,7 +780,7 @@ impl Proxy {
     }
 
     /// Check a load's destination, then proxy it or hand it back to Servo.
-    fn submit(&mut self, servo: &Servo, load: WebResourceLoad) {
+    fn submit(&mut self, load: WebResourceLoad) {
         let url = load.request.url.clone().into_url();
         // Only http(s), data, blob and about are ever allowed; anything else
         // is refused before Servo can fetch it.
@@ -823,7 +790,7 @@ impl Proxy {
             return;
         }
         if self.allow_private {
-            self.dispatch(servo, load, &[]);
+            self.dispatch(load);
             return;
         }
         // A redirect hop Servo would follow: the embedder only sees the
@@ -882,7 +849,7 @@ impl Proxy {
 
     /// Hand finished checks back. A refused load becomes a network error in
     /// the page; an allowed one is proxied or left to Servo.
-    fn deliver_checks(&mut self, servo: &Servo) {
+    fn deliver_checks(&mut self) {
         while let Ok((id, result)) = self.check_rx.try_recv() {
             let Some(load) = self.checking.remove(&id) else {
                 continue;
@@ -890,7 +857,7 @@ impl Proxy {
             self.tasks.remove(&id);
             self.last_activity = Some(Instant::now());
             match result {
-                Ok(addrs) => self.dispatch(servo, load, &addrs),
+                Ok(_) => self.dispatch(load),
                 Err(e) => {
                     tracing::debug!(host = %load.request.url.as_url().host_str().unwrap_or_default(), error = %e, "blocked a non-public request");
                     cancel_load(load);
@@ -901,7 +868,7 @@ impl Proxy {
 
     /// Make the request here when it is a same-origin script GET, otherwise
     /// drop the load and let Servo make it.
-    fn dispatch(&mut self, servo: &Servo, load: WebResourceLoad, addrs: &[IpAddr]) {
+    fn dispatch(&mut self, load: WebResourceLoad) {
         let request = &load.request;
         if should_proxy(
             request.destination,
@@ -909,20 +876,16 @@ impl Proxy {
             request.url.as_url(),
             request.referrer_url.as_ref().map(|u| u.as_url()),
         ) {
-            self.start(servo, load, addrs);
+            self.start(load);
         }
     }
 
-    /// Start a request for `load` with the cookies Servo holds for its URL.
-    fn start(&mut self, servo: &Servo, load: WebResourceLoad, addrs: &[IpAddr]) {
+    /// Proxy a same-origin script GET. Its redirects are followed by
+    /// [`fetch_redirect_chain`], never by reqwest, and it stays in its origin.
+    fn start(&mut self, load: WebResourceLoad) {
         let request = &load.request;
         let url = strip_userinfo(request.url.clone().into_url());
         let mut headers = request.headers.clone();
-        if let Some(cookie) = cookie_header(servo, &url) {
-            if let Ok(value) = HeaderValue::from_str(&cookie) {
-                headers.insert(COOKIE, value);
-            }
-        }
         if let Some(referrer) = request.referrer_url.as_ref().map(|u| u.as_url()) {
             if let Ok(value) = HeaderValue::from_str(referrer.as_str()) {
                 headers.insert(REFERER, value);
@@ -931,35 +894,14 @@ impl Proxy {
         if let Ok(value) = HeaderValue::from_str(user_agent()) {
             headers.insert(UA_HEADER, value);
         }
-
-        let client = match pinned_client(&url, addrs, true) {
-            Ok(client) => client,
-            Err(e) => {
-                tracing::debug!(host = %url.host_str().unwrap_or_default(), error = %e, "blocked a request");
-                cancel_load(load);
-                return;
-            }
+        let chain = Chain {
+            method: reqwest::Method::GET,
+            headers,
+            cookies: self.cookies.clone(),
+            script_origin: Some(url.origin()),
+            check_addresses: !self.allow_private,
         };
-        let id = self.next_id;
-        self.next_id += 1;
-        self.in_flight.insert(id, load);
-        self.last_activity = Some(Instant::now());
-        let done = self.done_tx.clone();
-        let handle = self.runtime.spawn(async move {
-            let result = tokio::time::timeout(
-                REQUEST_TIMEOUT,
-                fetch(client, url, reqwest::Method::GET, headers),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                Err(format!(
-                    "no response within {} seconds",
-                    REQUEST_TIMEOUT.as_secs()
-                ))
-            });
-            let _ = done.send((id, result));
-        });
-        self.tasks.insert(id, handle);
+        self.spawn_chain(load, url, chain);
     }
 
     /// Follow a redirect hop ourselves, checking each hop, and hand the render
@@ -976,30 +918,42 @@ impl Proxy {
         if let Ok(value) = HeaderValue::from_str(user_agent()) {
             headers.insert(UA_HEADER, value);
         }
-        let id = self.next_id;
-        self.next_id += 1;
         // submit allows only GET and HEAD here.
         let method = if request.method.as_str() == "HEAD" {
             reqwest::Method::HEAD
         } else {
             reqwest::Method::GET
         };
-        let cookies = self.cookies.clone();
+        // A script request's redirect may not leave its origin; submit has
+        // already refused a cross-origin one.
+        let script_origin = (request.destination == Destination::None).then(|| url.origin());
+        let chain = Chain {
+            method,
+            headers,
+            cookies: self.cookies.clone(),
+            script_origin,
+            check_addresses: !self.allow_private,
+        };
+        self.spawn_chain(load, url, chain);
+    }
+
+    /// Run the redirect chain for `load` on the runtime, and deliver its final
+    /// response, or its failure, back to the render loop.
+    fn spawn_chain(&mut self, load: WebResourceLoad, url: url::Url, chain: Chain) {
+        let id = self.next_id;
+        self.next_id += 1;
         self.in_flight.insert(id, load);
         self.last_activity = Some(Instant::now());
         let done = self.done_tx.clone();
         let handle = self.runtime.spawn(async move {
-            let result = tokio::time::timeout(
-                REQUEST_TIMEOUT,
-                fetch_redirect_chain(url, method, headers, cookies),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                Err(format!(
-                    "no response within {} seconds",
-                    REQUEST_TIMEOUT.as_secs()
-                ))
-            });
+            let result = tokio::time::timeout(REQUEST_TIMEOUT, fetch_redirect_chain(url, chain))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(format!(
+                        "no response within {} seconds",
+                        REQUEST_TIMEOUT.as_secs()
+                    ))
+                });
             let _ = done.send((id, result));
         });
         self.tasks.insert(id, handle);
@@ -1061,65 +1015,79 @@ impl Proxy {
     }
 }
 
-/// Follow `url`'s redirects ourselves, checking and pinning every hop. The
-/// first hop is requested twice: Servo already made it and its redirect is
-/// the load being answered. Each hop is sent the jar's cookies for its own
-/// URL, and each hop's `Set-Cookie` is stored for the hops after it.
-async fn fetch_redirect_chain(
-    url: url::Url,
+/// What one proxied request needs to follow its redirects.
+struct Chain {
     method: reqwest::Method,
     headers: HeaderMap,
     cookies: CookieLink,
-) -> ProxyResult {
+    /// The origin a script request must stay in. Servo's CORS check cannot be
+    /// applied to a hop that leaves it, so such a hop is refused.
+    script_origin: Option<url::Origin>,
+    /// Whether each hop's address is checked. Off only with
+    /// `allow_private_networks`, for local testing.
+    check_addresses: bool,
+}
+
+/// Follow `url`'s redirects ourselves, whatever the request, and return the
+/// final response. reqwest never follows a redirect here. Every hop is checked
+/// before it is requested and pinned to the addresses it was checked at. Each
+/// hop is sent the jar's cookies for its own URL, and each hop's `Set-Cookie` is
+/// stored for the hops after it. The first hop is requested the same way, so the
+/// same rules apply to it.
+async fn fetch_redirect_chain(url: url::Url, chain: Chain) -> ProxyResult {
     let mut url = url;
     for _ in 0..MAX_REDIRECTS {
-        // Checks the scheme and address, and each target is checked before it
-        // is requested, including the first hop.
-        let addrs = check_destination(&url).await?;
-        let client = pinned_client(&url, &addrs, false)?;
+        if let Some(origin) = &chain.script_origin {
+            if url.origin() != *origin {
+                return Err("a script request was redirected to another origin".to_string());
+            }
+        }
+        let addrs = if chain.check_addresses {
+            check_destination(&url).await?
+        } else {
+            check_scheme(&url)?;
+            Vec::new()
+        };
+        let client = pinned_client(&url, &addrs)?;
         // The jar's cookies for this URL replace whatever the page sent, so a
         // cookie for one host never goes to another.
-        let mut hop_headers = headers.clone();
+        let mut hop_headers = chain.headers.clone();
         hop_headers.remove(COOKIE);
-        if let Some(cookie) = cookies.header_for(&url).await? {
+        if let Some(cookie) = chain.cookies.header_for(&url).await? {
             if let Ok(value) = HeaderValue::from_str(&cookie) {
                 hop_headers.insert(COOKIE, value);
             }
         }
-        let response = fetch(client, url.clone(), method.clone(), hop_headers).await?;
+        let response = fetch(client, url.clone(), chain.method.clone(), hop_headers).await?;
         if !response.status.is_redirection() {
             return Ok(response);
         }
-        cookies.store(&url, set_cookie_values(&response.headers));
+        chain
+            .cookies
+            .store(&url, set_cookie_values(&response.headers));
         let location = response
             .headers
             .get(reqwest::header::LOCATION)
             .and_then(|value| value.to_str().ok())
             .ok_or_else(|| "a redirect response had no Location".to_string())?;
-        // The next iteration checks the target's scheme and address before
+        // The next iteration checks the target's scheme and origin before
         // anything is requested from it.
         url = strip_userinfo(url.join(location).map_err(|e| e.to_string())?);
     }
     Err(format!("more than {MAX_REDIRECTS} redirects"))
 }
 
-/// Build the client for one proxied request, pinned to the addresses the
-/// check resolved so a second answer cannot move the connection to a private
-/// host.
-fn pinned_client(
-    url: &url::Url,
-    addrs: &[IpAddr],
-    follow: bool,
-) -> Result<reqwest::Client, String> {
+/// Build the client for one proxied request. It never follows a redirect: the
+/// chain does. Connections are pinned to `addrs`, the addresses the check
+/// resolved, so a second DNS answer cannot move a connection to a private host.
+/// Empty `addrs` leaves resolution to reqwest, which happens only with
+/// `allow_private_networks`.
+fn pinned_client(url: &url::Url, addrs: &[IpAddr]) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .user_agent(user_agent())
         .timeout(REQUEST_TIMEOUT)
         .no_proxy()
-        .redirect(if follow {
-            reqwest::redirect::Policy::custom(redirect_policy)
-        } else {
-            reqwest::redirect::Policy::none()
-        });
+        .redirect(reqwest::redirect::Policy::none());
     if let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) {
         let sockets: Vec<std::net::SocketAddr> = addrs
             .iter()
@@ -1265,10 +1233,10 @@ fn render_one(
 
         let held: Vec<WebResourceLoad> = delegate.held.borrow_mut().drain(..).collect();
         for load in held {
-            proxy.submit(servo, load);
+            proxy.submit(load);
         }
         proxy.serve_cookies(servo);
-        proxy.deliver_checks(servo);
+        proxy.deliver_checks();
         proxy.deliver_finished(servo);
 
         let status = webview.load_status();
@@ -1776,23 +1744,6 @@ mod tests {
                 "{url} should be refused"
             );
         }
-    }
-
-    #[test]
-    fn redirect_decision_refuses_private_literals() {
-        let private = url::Url::parse("http://127.0.0.1:9/").unwrap();
-        assert!(redirect_decision("example.com", &private, false).is_err());
-        assert!(redirect_decision("example.com", &private, true).is_ok());
-
-        // A host change is allowed: check_destination guards the next hop.
-        let other = url::Url::parse("http://other.example/").unwrap();
-        assert!(redirect_decision("example.com", &other, false).is_ok());
-
-        let same = url::Url::parse("http://example.com/next").unwrap();
-        assert!(redirect_decision("example.com", &same, false).is_ok());
-
-        let no_host = url::Url::parse("data:text/plain,hi").unwrap();
-        assert!(redirect_decision("example.com", &no_host, false).is_err());
     }
 
     #[test]
