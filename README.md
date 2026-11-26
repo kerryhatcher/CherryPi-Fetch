@@ -1,5 +1,8 @@
 # cherrypi-fetch
 
+A tool that humans and agents can use to fetch data from any webpage, even
+SPAs. Originally for the CherryPi AI agent harness.
+
 Renders JavaScript-heavy web pages in [Servo](https://servo.org) and returns
 their title and visible text. It runs as a library or as a command-line tool.
 No Chrome, Chromium or V8 is involved.
@@ -7,8 +10,8 @@ No Chrome, Chromium or V8 is involved.
 ## CLI
 
 ```sh
-cargo run --release -p cherrypi-fetch -- https://example.com/
-cargo run --release -p cherrypi-fetch -- --json --max-chars 20000 https://a.example/ https://b.example/
+cargo run --release -- https://example.com/
+cargo run --release -- --json --max-chars 20000 https://a.example/ https://b.example/
 cargo install --path .   # puts cherrypi-fetch on PATH
 ```
 
@@ -38,12 +41,18 @@ incomplete, 1 when at least one failed or the arguments were bad.
 ## Library
 
 ```rust
-cherrypi_fetch::configure(cherrypi_fetch::RendererConfig {
-    user_agent: "MyTool/1.0".into(),
-})?; // optional; call before the first render
-let result = cherrypi_fetch::render_page(url, cherrypi_fetch::RENDER_TIMEOUT).await;
-cherrypi_fetch::shutdown_renderer(); // before the process exits, on every path
-let page = result?;
+// Cargo.toml: cherrypi-fetch = "0.1", url = "2"
+async fn demo() -> Result<(), cherrypi_fetch::RenderError> {
+    cherrypi_fetch::configure(cherrypi_fetch::RendererConfig {
+        user_agent: "MyTool/1.0".into(),
+    })?; // optional; call before the first render
+    let url = url::Url::parse("https://example.com/").unwrap();
+    let result = cherrypi_fetch::render_page(url, cherrypi_fetch::RENDER_TIMEOUT).await;
+    cherrypi_fetch::shutdown_renderer(); // before the process exits, on every path
+    let page = result?;
+    println!("{}\n{}", page.title, page.text);
+    Ok(())
+}
 ```
 
 Servo runs once per process, on its own thread, so the settings apply to the
