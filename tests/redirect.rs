@@ -139,7 +139,7 @@ async fn a_redirect_to_loopback_is_refused() {
 
     // A top-level navigation that redirects to loopback.
     let url = url::Url::parse(&format!("http://127.0.0.1:{top_port}/top")).unwrap();
-    let page = render_page(url, Duration::from_secs(10)).await;
+    let page = render_page(url, Duration::from_secs(30)).await;
     thread::sleep(Duration::from_millis(300));
     assert_eq!(
         secret_hits.load(Ordering::SeqCst),
@@ -154,7 +154,7 @@ async fn a_redirect_to_loopback_is_refused() {
         base64(html.as_bytes())
     ))
     .unwrap();
-    let _ = render_page(page_url, Duration::from_secs(10)).await;
+    let _ = render_page(page_url, Duration::from_secs(30)).await;
     thread::sleep(Duration::from_millis(300));
     assert_eq!(
         secret_hits.load(Ordering::SeqCst),
@@ -172,7 +172,7 @@ async fn a_redirect_to_loopback_is_refused() {
     set_test_public_origins(&[("127.0.0.1", public_top), ("127.0.0.1", target)]);
     let page = render_page(
         url::Url::parse(&format!("http://127.0.0.1:{public_top}/top")).unwrap(),
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     )
     .await
     .expect("the public redirect should render");

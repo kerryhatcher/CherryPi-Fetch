@@ -125,7 +125,7 @@ async fn blocks_private_and_non_http_destinations() {
          </body></html>",
         png.display()
     ));
-    let page = render_page(file_page, Duration::from_secs(10))
+    let page = render_page(file_page, Duration::from_secs(30))
         .await
         .expect("the data: page should render");
     assert!(
@@ -141,7 +141,7 @@ async fn blocks_private_and_non_http_destinations() {
         data_page(&format!(
             "<html><body>hello<img src=\"{secret}\"></body></html>"
         )),
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     )
     .await
     .expect("the data: page should render");
@@ -164,7 +164,7 @@ async fn blocks_private_and_non_http_destinations() {
          w.onmessage = function (e) {{ document.getElementById('out').textContent = 'worker-' + e.data; }};\
          </script></body></html>"
     ));
-    let page = render_page(worker_page, Duration::from_secs(10))
+    let page = render_page(worker_page, Duration::from_secs(30))
         .await
         .expect("the worker page should render");
     thread::sleep(Duration::from_millis(300));

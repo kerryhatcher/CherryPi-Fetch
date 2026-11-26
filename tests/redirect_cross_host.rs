@@ -48,6 +48,7 @@ async fn redirects_between_hosts_follow_the_address_check_on_each_hop() {
     });
     mark_public(&[("127.0.0.1", port)]);
     let page = render(&format!("http://127.0.0.1:{port}/cross")).await;
+    std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(
         unmarked.hits("/target").is_empty(),
         "a redirect reached a host that was not marked public: {:?}",

@@ -54,6 +54,7 @@ async fn a_script_request_redirect_is_checked_on_every_hop() {
     let blocked = render(&format!("http://127.0.0.1:{}/", origin.port))
         .await
         .expect("the page should render");
+    std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(
         loopback.hits("/target").is_empty(),
         "a same-origin XHR redirect reached a hostname that resolves to loopback: {:?}",
@@ -77,6 +78,7 @@ async fn a_script_request_redirect_is_checked_on_every_hop() {
     let cross = render(&format!("http://127.0.0.1:{}/c", origin.port))
         .await
         .expect("the page should render");
+    std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(
         other.hits("/o").is_empty(),
         "a script request left its origin through a redirect: {:?}",

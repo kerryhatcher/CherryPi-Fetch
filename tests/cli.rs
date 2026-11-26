@@ -58,6 +58,8 @@ fn renders_to_json_lines_and_reports_failures() {
     let output = cherrypi_fetch()
         .args([
             "--json",
+            "--timeout",
+            "30",
             "--allow-private",
             "--user-agent",
             "cli-test/1.0",

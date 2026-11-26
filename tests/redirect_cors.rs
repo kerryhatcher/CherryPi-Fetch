@@ -39,6 +39,7 @@ async fn a_cross_origin_script_fetch_that_redirects_is_refused() {
         .await
         .expect("the page should render");
 
+    std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(
         other.hits("/b").is_empty(),
         "the cross-origin redirect target was requested: {:?}",

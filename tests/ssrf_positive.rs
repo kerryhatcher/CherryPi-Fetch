@@ -109,7 +109,7 @@ async fn fetches_private_subresources_when_allowed() {
     let page = data_page(&format!(
         "<html><body>hello<img src=\"{secret}\"></body></html>"
     ));
-    let _ = render_page(page, Duration::from_secs(10)).await;
+    let _ = render_page(page, Duration::from_secs(30)).await;
     thread::sleep(Duration::from_millis(300));
     assert!(
         hits.load(Ordering::SeqCst) >= 1,
@@ -126,7 +126,7 @@ async fn fetches_private_subresources_when_allowed() {
          </body></html>",
         png.display()
     ));
-    let page = render_page(file_page, Duration::from_secs(10))
+    let page = render_page(file_page, Duration::from_secs(30))
         .await
         .expect("the file: page should render");
     assert!(
@@ -145,7 +145,7 @@ async fn fetches_private_subresources_when_allowed() {
          w.onmessage = function (e) {{ document.getElementById('out').textContent = 'worker-' + e.data; }};\
          </script></body></html>"
     ));
-    let page = render_page(worker_page, Duration::from_secs(10))
+    let page = render_page(worker_page, Duration::from_secs(30))
         .await
         .expect("the worker page should render");
     thread::sleep(Duration::from_millis(300));

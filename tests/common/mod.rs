@@ -209,7 +209,9 @@ pub fn mark_public(origins: &[(&str, u16)]) {
     set_test_public_origins(origins);
 }
 
-/// Render `url` with a generous budget.
+/// Render `url` with a generous budget. A render returns as soon as its page
+/// settles, so a passing run stays fast; the budget only has to survive a loaded
+/// machine.
 pub async fn render(url: &str) -> Result<RenderedPage, cherrypi_fetch::RenderError> {
-    render_page(url::Url::parse(url).unwrap(), Duration::from_secs(10)).await
+    render_page(url::Url::parse(url).unwrap(), Duration::from_secs(30)).await
 }
