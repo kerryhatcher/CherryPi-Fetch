@@ -1,0 +1,50 @@
+name: Set up the Servo build
+description: Free disk space, install Servo's system packages, install the pinned Rust toolchain from rust-toolchain.toml and restore the build cache.
+
+inputs:
+  shared-key:
+    description: Cache key shared by jobs that build the same artifacts.
+    required: true
+  install-dependencies:
+    description: Install the Linux system packages Servo needs.
+    required: false
+    default: "true"
+  cache:
+    description: Restore and save the Rust build cache.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Free disk space
+      if: runner.os == 'Linux' && inputs.install-dependencies == 'true'
+      shell: bash
+      run: |
+        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+        sudo apt-get clean
+
+    - name: Install system packages
+      if: runner.os == 'Linux' && inputs.install-dependencies == 'true'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential cmake pkg-config clang libclang-dev \
+          libfontconfig1-dev libegl1-mesa-dev libegl1 libgl1-mesa-dri \
+          fonts-dejavu-core
+
+    - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+      with:
+        # rust-toolchain.toml selects the toolchain; the cache is managed by
+        # Swatinem/rust-cache below.
+        cache: false
+        # The action defaults this to "deny", which turns Cargo's own
+        # manifest warnings (e.g. homepage == repository) into errors.
+        build-warnings: ""
+
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      if: inputs.cache == 'true'
+      with:
+        shared-key: ${{ inputs.shared-key }}
+        cache-on-failure: true

@@ -1,0 +1,277 @@
+name: Release
+
+# Publishing happens from tags only. The workflow only starts for a v*.*.*
+# tag, and the `release` environment only allows tags matching v*.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+# This workflow reads the repository; only `github-release` writes repository
+# contents.
+permissions:
+  contents: read
+
+# Never cancel a release that is already running.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  # Mesa's software rasterizer, so the headless Servo render tests run.
+  LIBGL_ALWAYS_SOFTWARE: "1"
+
+jobs:
+  # Cheap gate with no Servo build: parse the tag, check it against
+  # Cargo.toml and the CHANGELOG, and check formatting. Everything else
+  # needs it, so a bad tag or a missing changelog entry fails fast.
+  verify:
+    name: Verify tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      prerelease: ${{ steps.parse.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The full history is needed to check the tag is on main.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Ensure the tag is on main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag ${GITHUB_REF_NAME} is not on main"
+            exit 1
+          fi
+      - name: Parse the tag and check Cargo.toml
+        id: parse
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if ! printf '%s' "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-test\.[0-9]+)?$'; then
+            echo "::error::tag ${tag} must look like vX.Y.Z"
+            exit 1
+          fi
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ -z "$version" ]; then
+            echo "::error::could not read the package version from Cargo.toml"
+            exit 1
+          fi
+          prerelease=false
+          case "$tag" in
+            *-*) prerelease=true ;;
+          esac
+          # A stable tag must match the manifest exactly. A dry-run tag such
+          # as v0.1.0-test.1 may differ from Cargo.toml.
+          if [ "$prerelease" = "false" ] && [ "$tag" != "v${version}" ]; then
+            echo "::error::tag ${tag} does not match Cargo.toml version ${version}"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+          echo "tag ${tag} -> version ${version} (prerelease=${prerelease})"
+      - name: Check the CHANGELOG has the section
+        env:
+          VERSION: ${{ steps.parse.outputs.version }}
+          PRERELEASE: ${{ steps.parse.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          version_re="${VERSION//./\\.}"
+          if [ "$PRERELEASE" = "true" ]; then
+            # A dry run only needs the heading.
+            pattern="^## \[${version_re}\]"
+          else
+            # A real release needs the dated form '## [X.Y.Z] - YYYY-MM-DD'.
+            pattern="^## \[${version_re}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$"
+          fi
+          if ! grep -qE "$pattern" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no matching '## [${VERSION}]' section"
+            exit 1
+          fi
+      - uses: ./.github/actions/setup
+        with:
+          shared-key: verify
+          install-dependencies: "false"
+          cache: "false"
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  # Build the release binary for each target, package it with the archive
+  # root layout cargo-binstall expects, and smoke-test the packaged binary.
+  binaries:
+    name: Binaries (${{ matrix.target }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-apple-darwin
+            os: macos-15
+    env:
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          shared-key: release-${{ matrix.target }}
+      # The plan's `verify` checks that need a build (clippy and the publish
+      # dry run) run here, on one target, so `verify` stays a build-free gate.
+      - name: Clippy
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test (release)
+        run: cargo test --release --locked --target ${{ matrix.target }}
+      - name: Publish dry run
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo publish --dry-run --locked
+      - name: Build (release)
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist staging
+          cp "target/${TARGET}/release/cherrypi-fetch" staging/
+          cp LICENSE README.md staging/
+          archive="cherrypi-fetch-${VERSION}-${TARGET}.tar.gz"
+          # The binary, LICENSE and README sit at the archive root.
+          COPYFILE_DISABLE=1 tar -czf "dist/${archive}" -C staging cherrypi-fetch LICENSE README.md
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum "${archive}" > "${archive}.sha256")
+          else
+            (cd dist && shasum -a 256 "${archive}" > "${archive}.sha256")
+          fi
+          ls -l dist
+      - name: Smoke-test the packaged binary
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p smoke
+          tar -xzf "dist/cherrypi-fetch-${VERSION}-${TARGET}.tar.gz" -C smoke
+          ./smoke/cherrypi-fetch --version
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cherrypi-fetch-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Create the release from the CHANGELOG section and attach the archives.
+  # A -test.N tag produces a draft release.
+  github-release:
+    name: GitHub release
+    needs: [verify, binaries]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Extract the CHANGELOG notes
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          awk -v version="$VERSION" '
+            index($0, "## [" version "]") == 1 { capture = 1; next }
+            capture && (/^## \[/ || /^\[[^]]+\]: /) { exit }
+            capture { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG.md has no '## [${VERSION}]' section"
+            exit 1
+          fi
+          cat notes.md
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          args=(--title "$TAG" --notes-file notes.md)
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--draft)
+          fi
+          # Idempotent for a re-run: update the release in place so a public
+          # release is never missing while its assets are replaced.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --title "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" "${args[@]}" dist/*
+          fi
+
+  # Publish to crates.io with a short-lived trusted-publishing token. The
+  # job is skipped for -test.N dry runs and skips itself if the version is
+  # already on crates.io.
+  publish:
+    name: Publish to crates.io
+    needs: [verify, binaries]
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check whether the version is already on crates.io
+        id: check
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          status="$(curl -sS --connect-timeout 10 --max-time 60 --retry 3 --retry-delay 5 \
+            -o /dev/null -w '%{http_code}' \
+            -A "cherrypi-fetch release (${REPO})" \
+            "https://crates.io/api/v1/crates/cherrypi-fetch/${VERSION}")"
+          case "$status" in
+            200)
+              echo "::notice::cherrypi-fetch ${VERSION} is already published; skipping"
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::unexpected HTTP ${status} from crates.io for ${VERSION}"
+              exit 1
+              ;;
+          esac
+      - uses: ./.github/actions/setup
+        if: steps.check.outputs.published == 'false'
+        with:
+          shared-key: publish
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        if: steps.check.outputs.published == 'false'
+        id: auth
+      - name: Publish
+        if: steps.check.outputs.published == 'false'
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

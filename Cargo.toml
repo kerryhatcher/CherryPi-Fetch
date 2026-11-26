@@ -46,3 +46,11 @@ clap = { version = "4", features = ["derive"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
+
+# Let `cargo binstall` fetch the prebuilt archive from the GitHub release
+# instead of building Servo. The archive root holds the binary, LICENSE and
+# README; release.yml creates it with this exact name.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
