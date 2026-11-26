@@ -9,6 +9,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Private, loopback and link-local destinations are refused by default, for
+  the page, every resource it loads and every redirect, after DNS resolution;
+  `user:pass@` is stripped from URLs. `--allow-private` and
+  `RendererConfig::allow_private_networks` opt out for local testing.
+
 ## [0.1.0] - 2026-11-26
 
 Initial release: the `cherrypi-fetch` library and CLI, moved out of CherryPi's
@@ -42,4 +51,5 @@ Initial release: the `cherrypi-fetch` library and CLI, moved out of CherryPi's
   when at least one failed (even if others were incomplete) or the arguments
   were bad, 2 when at least one was incomplete and none failed.
 
+[Unreleased]: https://github.com/kerryhatcher/CherryPi-Fetch/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/kerryhatcher/CherryPi-Fetch/releases/tag/v0.1.0

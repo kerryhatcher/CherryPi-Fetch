@@ -49,6 +49,7 @@ cherrypi-fetch --json --max-chars 20000 https://a.example/ https://b.example/
 | `--user-agent <str>` | Windows Firefox 160 | User-Agent for the page and its requests |
 | `--json` | off | One JSON object per URL (JSON Lines) instead of text |
 | `--max-chars <n>` | none | Keep at most this many characters of each page's text |
+| `--allow-private` | off | Allow loopback, private and link-local destinations (local testing) |
 
 URLs are rendered one after another. Each one starts with no cookies, storage
 or cache left by the ones before it.
@@ -127,13 +128,15 @@ captured no text, it fails (`ok:false`, exit 1).
 
 ## Limitations
 
-- **No private-address blocking.** A URL can point at localhost, a private
-  address or a cloud metadata endpoint, and the page and its resources are
-  fetched from it. Do not pass untrusted URLs from a network that has internal
-  hosts. Tracked in
-  [#6](https://github.com/kerryhatcher/CherryPi-Fetch/issues/6).
-- **Credentials in URLs are not stripped.** Tracked in
-  [#6](https://github.com/kerryhatcher/CherryPi-Fetch/issues/6).
+- **Private addresses are refused by default.** The page, every resource it
+  loads and every redirect must resolve to a public address. Loopback, private
+  and link-local addresses (including cloud metadata services such as
+  169.254.169.254) are blocked, and `user:pass@` is stripped from URLs. Use
+  `--allow-private` (or `RendererConfig::allow_private_networks`) only for
+  local testing.
+- **DNS rebinding is not closed.** A host is resolved and checked once, and
+  Servo resolves it again when it connects, so a server that changes its
+  answer between the two can swap a public address for a private one.
 - **Not for CAPTCHA or login-walled pages.** A page that blocks automated
   browsers, or that needs a login, comes back blank or incomplete.
 - **Prebuilt archives are only published for x86_64 Linux (glibc 2.39+) and

@@ -45,6 +45,7 @@ fn renders_to_json_lines_and_reports_failures() {
     let output = cherrypi_fetch()
         .args([
             "--json",
+            "--allow-private",
             "--user-agent",
             "cli-test/1.0",
             "--max-chars",
@@ -72,6 +73,37 @@ fn renders_to_json_lines_and_reports_failures() {
     assert_eq!(records[1]["ok"], false);
     assert!(records[1]["error"].as_str().unwrap().contains("scheme"));
     assert_eq!(output.status.code(), Some(1), "a failed URL exits 1");
+}
+
+#[test]
+fn blocks_private_addresses_by_default() {
+    let url = serve();
+
+    let output = cherrypi_fetch().args(["--json", &url]).output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a private address should fail"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let record: serde_json::Value =
+        serde_json::from_str(stdout.lines().next().expect("a JSON record")).unwrap();
+    assert_eq!(record["ok"], false, "{record}");
+    assert!(
+        record["error"].as_str().unwrap().contains("non-public"),
+        "{record}"
+    );
+
+    let output = cherrypi_fetch()
+        .args(["--json", "--allow-private", &url])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

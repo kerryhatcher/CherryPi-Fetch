@@ -30,6 +30,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::rc::Rc;
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -56,12 +57,17 @@ pub const DEFAULT_USER_AGENT: &str =
 pub struct RendererConfig {
     /// User-Agent for the page and every request it makes.
     pub user_agent: String,
+    /// Allow the page and its resources to reach loopback, private and other
+    /// non-public addresses. Off by default; turn it on only for local
+    /// testing.
+    pub allow_private_networks: bool,
 }
 
 impl Default for RendererConfig {
     fn default() -> Self {
         Self {
             user_agent: DEFAULT_USER_AGENT.to_string(),
+            allow_private_networks: false,
         }
     }
 }
@@ -110,6 +116,132 @@ fn config() -> &'static RendererConfig {
 
 fn user_agent() -> &'static str {
     &config().user_agent
+}
+
+fn allow_private_networks() -> bool {
+    config().allow_private_networks
+}
+
+/// Whether `ip` is a public destination. Loopback, private, link-local,
+/// unspecified, broadcast, shared (CGNAT), documentation, benchmarking and
+/// multicast addresses are not public, and an IPv4-mapped IPv6 address is
+/// checked as its IPv4 address.
+fn is_public_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_public_ipv4(v4),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_public_ipv4(v4),
+            None => is_public_ipv6(v6),
+        },
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let o = ip.octets();
+    !(o[0] == 0 // 0.0.0.0/8 "this network"
+        || o[0] == 10 // 10.0.0.0/8
+        || o[0] == 127 // 127.0.0.0/8 loopback
+        || (o[0] == 100 && (o[1] & 0xc0) == 64) // 100.64.0.0/10 CGNAT
+        || (o[0] == 169 && o[1] == 254) // 169.254.0.0/16 link-local
+        || (o[0] == 172 && (o[1] & 0xf0) == 16) // 172.16.0.0/12
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0.0/24
+        || (o[0] == 192 && o[1] == 0 && o[2] == 2) // 192.0.2.0/24 TEST-NET-1
+        || (o[0] == 192 && o[1] == 88 && o[2] == 99) // 192.88.99.0/24
+        || (o[0] == 192 && o[1] == 168) // 192.168.0.0/16
+        || (o[0] == 198 && (o[1] == 18 || o[1] == 19)) // 198.18.0.0/15
+        || (o[0] == 198 && o[1] == 51 && o[2] == 100) // 198.51.100.0/24
+        || (o[0] == 203 && o[1] == 0 && o[2] == 113) // 203.0.113.0/24
+        || o[0] >= 224) // 224.0.0.0/4 multicast and 240.0.0.0/4 reserved
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return false;
+    }
+    let s = ip.segments();
+    // Unique local fc00::/7.
+    if (s[0] & 0xfe00) == 0xfc00 {
+        return false;
+    }
+    // Link-local fe80::/10.
+    if (s[0] & 0xffc0) == 0xfe80 {
+        return false;
+    }
+    // Documentation 2001:db8::/32.
+    if s[0] == 0x2001 && s[1] == 0x0db8 {
+        return false;
+    }
+    true
+}
+
+/// Parse a host as an IP literal, including a bracketed IPv6 literal.
+fn parse_ip_literal(host: &str) -> Option<IpAddr> {
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    host.parse::<IpAddr>().ok()
+}
+
+/// Resolve a host to every address it has. An IP literal is returned as-is.
+async fn resolve_addresses(host: &str, port: u16) -> Result<Vec<IpAddr>, String> {
+    if let Some(ip) = parse_ip_literal(host) {
+        return Ok(vec![ip]);
+    }
+    #[cfg(test)]
+    if let Some(ips) = test_resolver_lookup(host) {
+        return Ok(ips);
+    }
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("could not resolve {host}: {e}"))?;
+    let ips: Vec<IpAddr> = addrs.map(|addr| addr.ip()).collect();
+    if ips.is_empty() {
+        Err(format!("{host} did not resolve to an address"))
+    } else {
+        Ok(ips)
+    }
+}
+
+/// Refuse a URL whose host resolves to a non-public address. A URL without a
+/// host, such as a `data:` URL, is allowed.
+async fn check_destination(url: &url::Url) -> Result<(), String> {
+    let Some(host) = url.host_str() else {
+        return Ok(());
+    };
+    let port = url.port_or_known_default().unwrap_or(0);
+    let ips = resolve_addresses(host, port).await?;
+    if let Some(ip) = ips.iter().find(|ip| !is_public_address(**ip)) {
+        return Err(format!(
+            "refusing to fetch a non-public address for {host}: {ip} is loopback, private or \
+             otherwise not a public destination"
+        ));
+    }
+    Ok(())
+}
+
+/// Remove `user:pass@` from a URL, so credentials are never sent to a host.
+fn strip_userinfo(mut url: url::Url) -> url::Url {
+    if !url.username().is_empty() {
+        let _ = url.set_username("");
+    }
+    if url.password().is_some() {
+        let _ = url.set_password(None);
+    }
+    url
+}
+
+/// A test-only DNS override. Tests set the addresses a host resolves to
+/// without touching real DNS.
+#[cfg(test)]
+static TEST_RESOLVER: Mutex<Option<HashMap<String, Vec<IpAddr>>>> = Mutex::new(None);
+
+#[cfg(test)]
+fn test_resolver_lookup(host: &str) -> Option<Vec<IpAddr>> {
+    TEST_RESOLVER
+        .lock()
+        .ok()
+        .and_then(|map| map.as_ref().and_then(|m| m.get(host).cloned()))
 }
 
 /// Time allowed for one page to load and settle.
@@ -207,6 +339,12 @@ static RENDERER: Mutex<Lifecycle> = Mutex::new(Lifecycle::NotStarted);
 pub async fn render_page(url: url::Url, timeout: Duration) -> Result<RenderedPage, RenderError> {
     if timeout.is_zero() || timeout > MAX_TIMEOUT {
         return Err(RenderError::InvalidTimeout);
+    }
+    let url = strip_userinfo(url);
+    if !allow_private_networks() {
+        if let Err(e) = check_destination(&url).await {
+            return Err(RenderError::Failed(e));
+        }
     }
     let runtime = tokio::runtime::Handle::current();
     let result = tokio::task::spawn_blocking(move || -> Result<RenderedPage, String> {
@@ -327,9 +465,9 @@ struct Snapshot {
     samples: u32,
 }
 
-/// Receives the page's resource requests. Requests this module makes itself
-/// are held here until the render loop picks them up; the rest are dropped,
-/// which lets Servo load them as usual.
+/// Receives the page's resource requests. Every load is held until the render
+/// loop has checked its destination; then it is proxied, blocked or dropped
+/// (which lets Servo make it as usual).
 #[derive(Default)]
 struct PageDelegate {
     held: RefCell<Vec<WebResourceLoad>>,
@@ -340,14 +478,7 @@ struct PageDelegate {
 impl WebViewDelegate for PageDelegate {
     fn load_web_resource(&self, _webview: WebView, load: WebResourceLoad) {
         self.last_request.set(Some(Instant::now()));
-        if should_proxy(
-            load.request.destination,
-            load.request.method.as_str(),
-            load.request.url.as_url(),
-            load.request.referrer_url.as_ref().map(|u| u.as_url()),
-        ) {
-            self.held.borrow_mut().push(load);
-        }
+        self.held.borrow_mut().push(load);
     }
 }
 
@@ -377,43 +508,132 @@ struct ProxiedResponse {
 
 type ProxyResult = Result<ProxiedResponse, String>;
 
+/// A reqwest redirect policy that refuses to follow a redirect into a private
+/// address or to a different host. Only the first hop was checked, so only
+/// same-host redirects are followed.
+fn redirect_policy(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Action {
+    let host = attempt.url().host_str().unwrap_or_default().to_string();
+    if host.is_empty() {
+        return attempt.stop();
+    }
+    if let Some(ip) = parse_ip_literal(&host) {
+        if !is_public_address(ip) {
+            return attempt.stop();
+        }
+    }
+    let first_host = attempt
+        .previous()
+        .first()
+        .and_then(|first| first.host_str())
+        .unwrap_or_default()
+        .to_string();
+    if first_host != host {
+        return attempt.stop();
+    }
+    attempt.follow()
+}
+
 /// Requests made on the page's behalf that have not been answered yet.
 struct Proxy {
     client: reqwest::Client,
     runtime: tokio::runtime::Handle,
+    allow_private: bool,
     next_id: u64,
+    /// Loads whose destination is being resolved and checked.
+    checking: HashMap<u64, WebResourceLoad>,
+    /// Loads whose request we make ourselves.
     in_flight: HashMap<u64, WebResourceLoad>,
     /// When a request last started or finished.
     last_activity: Option<Instant>,
+    check_tx: mpsc::Sender<(u64, Result<(), String>)>,
+    check_rx: mpsc::Receiver<(u64, Result<(), String>)>,
     done_tx: mpsc::Sender<(u64, ProxyResult)>,
     done_rx: mpsc::Receiver<(u64, ProxyResult)>,
 }
 
 impl Proxy {
-    fn new(runtime: tokio::runtime::Handle) -> Self {
+    fn new(runtime: tokio::runtime::Handle, allow_private: bool) -> Self {
         let (done_tx, done_rx) = mpsc::channel();
+        let (check_tx, check_rx) = mpsc::channel();
         let client = reqwest::Client::builder()
             .user_agent(user_agent())
             .timeout(REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::custom(redirect_policy))
             .build()
             .unwrap_or_default();
         Self {
             client,
             runtime,
+            allow_private,
             next_id: 0,
+            checking: HashMap::new(),
             in_flight: HashMap::new(),
             last_activity: None,
+            check_tx,
+            check_rx,
             done_tx,
             done_rx,
         }
     }
 
-    /// No request is in flight and none has started or finished for `quiet`.
+    /// No check or request is outstanding, and none has started or finished
+    /// for `quiet`.
     fn is_idle(&self, now: Instant, quiet: Duration) -> bool {
-        self.in_flight.is_empty()
+        self.checking.is_empty()
+            && self.in_flight.is_empty()
             && self
                 .last_activity
                 .is_none_or(|t| now.duration_since(t) >= quiet)
+    }
+
+    /// Check a load's destination, then proxy it or hand it back to Servo.
+    fn submit(&mut self, servo: &Servo, load: WebResourceLoad) {
+        if self.allow_private {
+            self.dispatch(servo, load);
+            return;
+        }
+        let url = load.request.url.clone().into_url();
+        let id = self.next_id;
+        self.next_id += 1;
+        self.checking.insert(id, load);
+        self.last_activity = Some(Instant::now());
+        let tx = self.check_tx.clone();
+        self.runtime.spawn(async move {
+            let _ = tx.send((id, check_destination(&url).await));
+        });
+    }
+
+    /// Hand finished checks back. A refused load becomes a network error in
+    /// the page; an allowed one is proxied or left to Servo.
+    fn deliver_checks(&mut self, servo: &Servo) {
+        while let Ok((id, result)) = self.check_rx.try_recv() {
+            let Some(load) = self.checking.remove(&id) else {
+                continue;
+            };
+            self.last_activity = Some(Instant::now());
+            match result {
+                Ok(()) => self.dispatch(servo, load),
+                Err(e) => {
+                    tracing::debug!(url = %load.request.url, error = %e, "blocked a non-public request");
+                    let url = load.request.url.clone().into_url();
+                    load.intercept(WebResourceResponse::new(url)).cancel();
+                }
+            }
+        }
+    }
+
+    /// Make the request here when it is a same-origin script GET, otherwise
+    /// drop the load and let Servo make it.
+    fn dispatch(&mut self, servo: &Servo, load: WebResourceLoad) {
+        let request = &load.request;
+        if should_proxy(
+            request.destination,
+            request.method.as_str(),
+            request.url.as_url(),
+            request.referrer_url.as_ref().map(|u| u.as_url()),
+        ) {
+            self.start(servo, load);
+        }
     }
 
     /// Start a request for `load` with the cookies Servo holds for its URL.
@@ -569,7 +789,7 @@ fn render_one(
         .url(job.url.clone())
         .delegate(delegate.clone())
         .build();
-    let mut proxy = Proxy::new(job.runtime.clone());
+    let mut proxy = Proxy::new(job.runtime.clone(), allow_private_networks());
 
     let snapshot = Rc::new(RefCell::new(Snapshot::default()));
     let deadline = Instant::now() + job.timeout;
@@ -588,8 +808,9 @@ fn render_one(
 
         let held: Vec<WebResourceLoad> = delegate.held.borrow_mut().drain(..).collect();
         for load in held {
-            proxy.start(servo, load);
+            proxy.submit(servo, load);
         }
+        proxy.deliver_checks(servo);
         proxy.deliver_finished(servo);
 
         let status = webview.load_status();
@@ -861,10 +1082,13 @@ mod tests {
     async fn renders_pages() {
         let config = RendererConfig {
             user_agent: "cherrypi-fetch-test/1.0".into(),
+            // The local test servers listen on 127.0.0.1.
+            allow_private_networks: true,
         };
         assert_eq!(
             configure(RendererConfig {
-                user_agent: "bad\nagent".into()
+                user_agent: "bad\nagent".into(),
+                allow_private_networks: true,
             }),
             Err(RenderError::InvalidUserAgent)
         );
@@ -1012,6 +1236,67 @@ mod tests {
     #[test]
     fn normalizes_text_lines() {
         assert_eq!(normalize_text("  a   b \n\n \t\n c\n"), "a b\nc");
+    }
+
+    #[tokio::test]
+    async fn blocks_a_host_that_resolves_to_a_private_address() {
+        *TEST_RESOLVER.lock().unwrap() = Some(HashMap::from([(
+            "evil.test".to_string(),
+            vec!["127.0.0.1".parse().unwrap()],
+        )]));
+        let url = url::Url::parse("http://evil.test/").unwrap();
+        let result = check_destination(&url).await;
+        *TEST_RESOLVER.lock().unwrap() = None;
+        assert!(result.is_err(), "a host on 127.0.0.1 must be refused");
+    }
+
+    #[test]
+    fn classifies_public_addresses() {
+        for addr in [
+            "93.184.216.34",
+            "8.8.8.8",
+            "172.32.0.1",
+            "2606:4700:4700::1111",
+        ] {
+            assert!(
+                is_public_address(addr.parse().unwrap()),
+                "{addr} should be public"
+            );
+        }
+        for addr in [
+            "0.0.0.0",
+            "10.0.0.1",
+            "100.64.0.1",
+            "127.0.0.1",
+            "127.1.2.3",
+            "169.254.169.254",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.0.0.1",
+            "192.0.2.1",
+            "192.88.99.1",
+            "192.168.1.1",
+            "198.18.0.1",
+            "198.51.100.1",
+            "203.0.113.1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fc00::1",
+            "fd12:3456::1",
+            "fe80::1",
+            "ff02::1",
+            "2001:db8::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:169.254.169.254",
+        ] {
+            assert!(
+                !is_public_address(addr.parse().unwrap()),
+                "{addr} should be blocked"
+            );
+        }
     }
 
     #[test]

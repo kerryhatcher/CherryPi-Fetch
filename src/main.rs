@@ -41,6 +41,11 @@ struct Args {
     #[arg(long)]
     json: bool,
 
+    /// Allow pages and their resources to reach loopback, private and other
+    /// non-public addresses. Use it only for local testing.
+    #[arg(long)]
+    allow_private: bool,
+
     /// Keep at most this many characters of each page's text
     #[arg(long)]
     max_chars: Option<usize>,
@@ -98,6 +103,7 @@ async fn main() -> ExitCode {
 
     if let Err(e) = cherrypi_fetch::configure(RendererConfig {
         user_agent: args.user_agent.clone(),
+        allow_private_networks: args.allow_private,
     }) {
         eprintln!("cherrypi-fetch: {e}");
         return ExitCode::from(1);
@@ -107,13 +113,17 @@ async fn main() -> ExitCode {
     let mut worst = Outcome::Complete;
     for (index, raw) in args.urls.iter().enumerate() {
         let started = Instant::now();
-        let result = match parse_url(raw) {
-            Ok(url) => cherrypi_fetch::render_page(url, timeout)
-                .await
-                .map_err(|e| e.to_string()),
-            Err(e) => Err(e),
+        let (result, display) = match parse_url(raw) {
+            Ok(url) => {
+                let display = url.to_string();
+                let result = cherrypi_fetch::render_page(url, timeout)
+                    .await
+                    .map_err(|e| e.to_string());
+                (result, display)
+            }
+            Err(e) => (Err(e), raw.to_string()),
         };
-        let record = to_record(raw, result, args.max_chars, started.elapsed());
+        let record = to_record(&display, result, args.max_chars, started.elapsed());
         let outcome = if !record.ok {
             Outcome::Failed
         } else if record.incomplete.is_some() {
@@ -151,13 +161,23 @@ fn init_logging() {
 }
 
 fn parse_url(raw: &str) -> Result<url::Url, String> {
-    let url = url::Url::parse(raw).map_err(|e| format!("invalid URL: {e}"))?;
+    let mut url = url::Url::parse(raw).map_err(|e| format!("invalid URL: {e}"))?;
     match url.scheme() {
-        "http" | "https" => Ok(url),
-        other => Err(format!(
-            "unsupported URL scheme {other:?}: use http or https"
-        )),
+        "http" | "https" => {}
+        other => {
+            return Err(format!(
+                "unsupported URL scheme {other:?}: use http or https"
+            ));
+        }
     }
+    // Never send user:pass@ to the host.
+    if !url.username().is_empty() {
+        let _ = url.set_username("");
+    }
+    if url.password().is_some() {
+        let _ = url.set_password(None);
+    }
+    Ok(url)
 }
 
 fn to_record(
