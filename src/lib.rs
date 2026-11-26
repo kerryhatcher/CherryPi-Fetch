@@ -290,10 +290,10 @@ async fn check_destination(url: &url::Url) -> Result<Vec<IpAddr>, String> {
     };
     let port = url.port_or_known_default().unwrap_or(0);
     let ips = resolve_addresses(host, port).await?;
-    // A test can mark a loopback port as public, so a redirect away from it
-    // can be exercised without a real public address.
+    // A test can mark a host and port as public, so a redirect away from a
+    // loopback origin can be exercised without a real public address.
     #[cfg(feature = "test-hooks")]
-    if test_public_port(port) {
+    if test_public_origin(host, port) {
         return Ok(ips);
     }
     if let Some(ip) = ips.iter().find(|ip| !is_public_address(**ip)) {
@@ -321,33 +321,34 @@ pub fn strip_userinfo(mut url: url::Url) -> url::Url {
 #[cfg(test)]
 static TEST_RESOLVER: Mutex<Option<HashMap<String, Vec<IpAddr>>>> = Mutex::new(None);
 
-/// Ports an integration test has marked as public. See [`set_test_public_ports`].
+/// Host and port pairs an integration test has marked as public. See
+/// [`set_test_public_origins`].
 #[cfg(feature = "test-hooks")]
-static TEST_PUBLIC_PORTS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+static TEST_PUBLIC_ORIGINS: Mutex<Vec<(String, u16)>> = Mutex::new(Vec::new());
 
-/// Mark ports as public for the address check, so an integration test can
-/// point a redirect at loopback from a "public" origin. A test hook behind
-/// the non-default `test-hooks` feature, not for general use.
+/// Mark host and port pairs as public for the address check, so an integration
+/// test can point a redirect at loopback from a "public" origin. Each pair
+/// matches one host string exactly as the URL spells it (for example
+/// `"127.0.0.1"`) and one port, so marking a port does not mark other hosts on
+/// it. A test hook behind the non-default `test-hooks` feature, not for general
+/// use.
 #[cfg(feature = "test-hooks")]
 #[doc(hidden)]
-pub fn set_test_public_ports(ports: &[u16]) {
-    if let Ok(mut guard) = TEST_PUBLIC_PORTS.lock() {
-        *guard = ports.to_vec();
+pub fn set_test_public_origins(origins: &[(&str, u16)]) {
+    if let Ok(mut guard) = TEST_PUBLIC_ORIGINS.lock() {
+        *guard = origins
+            .iter()
+            .map(|(host, port)| ((*host).to_string(), *port))
+            .collect();
     }
 }
 
 #[cfg(feature = "test-hooks")]
-fn test_public_port(port: u16) -> bool {
-    TEST_PUBLIC_PORTS
+fn test_public_origin(host: &str, port: u16) -> bool {
+    TEST_PUBLIC_ORIGINS
         .lock()
-        .map(|guard| guard.contains(&port))
+        .map(|guard| guard.iter().any(|(h, p)| h == host && *p == port))
         .unwrap_or(false)
-}
-
-#[cfg(not(feature = "test-hooks"))]
-fn test_public_port(port: u16) -> bool {
-    let _ = port;
-    false
 }
 
 #[cfg(test)]
@@ -1000,16 +1001,9 @@ async fn fetch_redirect_chain(url: url::Url, headers: HeaderMap) -> ProxyResult 
             .get(reqwest::header::LOCATION)
             .and_then(|value| value.to_str().ok())
             .ok_or_else(|| "a redirect response had no Location".to_string())?;
-        let next = strip_userinfo(url.join(location).map_err(|e| e.to_string())?);
-        check_scheme(&next)?;
-        #[cfg(feature = "test-hooks")]
-        let test_public = test_public_port(next.port_or_known_default().unwrap_or(0));
-        #[cfg(not(feature = "test-hooks"))]
-        let test_public = false;
-        if !test_public {
-            redirect_decision(url.host_str().unwrap_or_default(), &next, false)?;
-        }
-        url = next;
+        // The next iteration checks the target's scheme and address before
+        // anything is requested from it.
+        url = strip_userinfo(url.join(location).map_err(|e| e.to_string())?);
     }
     Err(format!("more than {MAX_REDIRECTS} redirects"))
 }

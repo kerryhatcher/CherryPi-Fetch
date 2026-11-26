@@ -204,5 +204,5 @@ It returns text (and a JSON record with `--json`), not Markdown, a screenshot
 or a schema, and it does not crawl.
 
 The non-default `test-hooks` feature (used only by this crate's own
-integration tests) turns the private-address check off for ports a test names.
+integration tests) turns the private-address check off for host and port pairs a test names.
 Do not enable it in a published build.

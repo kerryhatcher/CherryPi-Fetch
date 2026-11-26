@@ -1,6 +1,6 @@
 //! A redirected load must be checked too (N1).
 //!
-//! The `test-hooks` feature marks a chosen loopback port as public, so a
+//! The `test-hooks` feature marks a chosen loopback host and port as public, so a
 //! redirect can be exercised without a real public address:
 //!
 //! ```sh
@@ -14,7 +14,7 @@ use std::thread;
 use std::time::Duration;
 
 use cherrypi_fetch::{
-    configure, render_page, set_test_public_ports, shutdown_renderer, RendererConfig,
+    configure, render_page, set_test_public_origins, shutdown_renderer, RendererConfig,
 };
 
 fn clear_proxy_env() {
@@ -129,7 +129,7 @@ async fn a_redirect_to_loopback_is_refused() {
     let (secret_port, secret_hits) = counting_server("LOOPBACK-SECRET");
     let top_port = redirect_server(&format!("http://127.0.0.1:{secret_port}/secret"));
     // The top-level port is public; the redirect target is not.
-    set_test_public_ports(&[top_port]);
+    set_test_public_origins(&[("127.0.0.1", top_port)]);
 
     configure(RendererConfig {
         user_agent: "redirect-test/1.0".into(),
@@ -169,7 +169,7 @@ async fn a_redirect_to_loopback_is_refused() {
         "<html><head><title>Final</title></head><body>REDIRECT-FINAL-PAGE</body></html>",
     );
     let public_top = redirect_server(&format!("http://127.0.0.1:{target}/target"));
-    set_test_public_ports(&[public_top, target]);
+    set_test_public_origins(&[("127.0.0.1", public_top), ("127.0.0.1", target)]);
     let page = render_page(
         url::Url::parse(&format!("http://127.0.0.1:{public_top}/top")).unwrap(),
         Duration::from_secs(10),
