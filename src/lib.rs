@@ -382,6 +382,8 @@ const STALL_AFTER: Duration = Duration::from_secs(3);
 const REPLY_SLACK: Duration = Duration::from_secs(10);
 /// Largest response body accepted for a request made on the page's behalf.
 const MAX_PROXY_BODY: usize = 5 * 1024 * 1024;
+/// Largest number of redirects followed for one request.
+const MAX_REDIRECTS: usize = 10;
 /// Response headers that describe the connection rather than the content.
 const HOP_BY_HOP: &[&str] = &[
     "connection",
@@ -766,6 +768,18 @@ impl Proxy {
             self.dispatch(servo, load, &[]);
             return;
         }
+        // A redirect hop Servo would follow: the embedder only sees the
+        // original URL, never the target, so make the request ourselves and
+        // check every hop. A non-GET hop is refused outright.
+        if load.request.is_redirect {
+            let method = load.request.method.as_str();
+            if method == "GET" || method == "HEAD" {
+                self.start_redirect(load);
+            } else {
+                cancel_load(load);
+            }
+            return;
+        }
         let id = self.next_id;
         self.next_id += 1;
         self.checking.insert(id, load);
@@ -842,7 +856,7 @@ impl Proxy {
             headers.insert(UA_HEADER, value);
         }
 
-        let client = match pinned_client(&url, addrs) {
+        let client = match pinned_client(&url, addrs, true) {
             Ok(client) => client,
             Err(e) => {
                 tracing::debug!(host = %url.host_str().unwrap_or_default(), error = %e, "blocked a request");
@@ -857,6 +871,39 @@ impl Proxy {
         let done = self.done_tx.clone();
         let handle = self.runtime.spawn(async move {
             let result = tokio::time::timeout(REQUEST_TIMEOUT, fetch(client, url, headers))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(format!(
+                        "no response within {} seconds",
+                        REQUEST_TIMEOUT.as_secs()
+                    ))
+                });
+            let _ = done.send((id, result));
+        });
+        self.tasks.insert(id, handle);
+    }
+
+    /// Follow a redirect hop ourselves, checking each hop, and hand the render
+    /// the final response.
+    fn start_redirect(&mut self, load: WebResourceLoad) {
+        let request = &load.request;
+        let url = strip_userinfo(request.url.clone().into_url());
+        let mut headers = request.headers.clone();
+        if let Some(referrer) = request.referrer_url.as_ref().map(|u| u.as_url()) {
+            if let Ok(value) = HeaderValue::from_str(referrer.as_str()) {
+                headers.insert(REFERER, value);
+            }
+        }
+        if let Ok(value) = HeaderValue::from_str(user_agent()) {
+            headers.insert(UA_HEADER, value);
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.in_flight.insert(id, load);
+        self.last_activity = Some(Instant::now());
+        let done = self.done_tx.clone();
+        let handle = self.runtime.spawn(async move {
+            let result = tokio::time::timeout(REQUEST_TIMEOUT, fetch_redirect_chain(url, headers))
                 .await
                 .unwrap_or_else(|_| {
                     Err(format!(
@@ -925,15 +972,50 @@ impl Proxy {
     }
 }
 
+/// Follow `url`'s redirects ourselves, checking and pinning every hop. The
+/// first hop is requested twice: Servo already made it and its redirect is
+/// the load being answered.
+async fn fetch_redirect_chain(url: url::Url, headers: HeaderMap) -> ProxyResult {
+    let mut url = url;
+    for _ in 0..MAX_REDIRECTS {
+        let addrs = check_destination(&url).await?;
+        let client = pinned_client(&url, &addrs, false)?;
+        let response = fetch(client, url.clone(), headers.clone()).await?;
+        if !response.status.is_redirection() {
+            return Ok(response);
+        }
+        let location = response
+            .headers
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| "a redirect response had no Location".to_string())?;
+        let next = url.join(location).map_err(|e| e.to_string())?;
+        check_scheme(&next)?;
+        if !test_public_port(next.port_or_known_default().unwrap_or(0)) {
+            redirect_decision(url.host_str().unwrap_or_default(), &next, false)?;
+        }
+        url = next;
+    }
+    Err(format!("more than {MAX_REDIRECTS} redirects"))
+}
+
 /// Build the client for one proxied request, pinned to the addresses the
 /// check resolved so a second answer cannot move the connection to a private
 /// host.
-fn pinned_client(url: &url::Url, addrs: &[IpAddr]) -> Result<reqwest::Client, String> {
+fn pinned_client(
+    url: &url::Url,
+    addrs: &[IpAddr],
+    follow: bool,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .user_agent(user_agent())
         .timeout(REQUEST_TIMEOUT)
         .no_proxy()
-        .redirect(reqwest::redirect::Policy::custom(redirect_policy));
+        .redirect(if follow {
+            reqwest::redirect::Policy::custom(redirect_policy)
+        } else {
+            reqwest::redirect::Policy::none()
+        });
     if let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) {
         let sockets: Vec<std::net::SocketAddr> = addrs
             .iter()

@@ -18,9 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- A redirect that the crate's own client follows now refuses a non-public
-  address or a different host, and fails the request instead of following it.
-  With `allow_private_networks` set, redirects are followed again.
+- Redirects are now checked. In default mode a redirect hop that Servo would
+  follow is re-requested by this crate, with check_destination and
+  redirect_decision on every hop and the final response handed back to the
+  render, so a redirect to a private address is refused. The first hop is
+  requested twice and cookies set by intermediate redirects are dropped. With
+  `allow_private_networks` set, Servo follows redirects as before.
 
 ### Added
 
@@ -36,11 +39,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Requests this crate makes itself are pinned to the addresses that were
   checked, so a second DNS answer cannot move the connection.
 
-### Known issues
-
-- A redirect followed by Servo's own loader is not re-checked: the embedder
-  only sees the original URL, so a public URL that redirects to a private one
-  is still followed. Tracked as N1.
 
 ## [0.1.0] - 2026-11-26
 

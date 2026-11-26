@@ -98,6 +98,10 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --locked
+      # The redirect hook lives behind a non-default feature, so its test runs
+      # separately and only on Linux.
+      - name: Redirect test
+        run: cargo test --features test-hooks --locked --test redirect
       - name: Build without default features
         run: cargo build --no-default-features --locked
       - name: Publish dry run

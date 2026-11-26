@@ -82,6 +82,23 @@ fn redirect_server(target: &str) -> u16 {
     port
 }
 
+/// A server that answers every request with 200 and `html`.
+fn html_server(html: &'static str) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            drain_request(&mut stream);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
+                html.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+    port
+}
+
 fn base64(data: &[u8]) -> String {
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
@@ -145,6 +162,25 @@ async fn a_redirect_to_loopback_is_refused() {
         secret_hits.load(Ordering::SeqCst),
         0,
         "an image redirect to loopback was followed (N1)"
+    );
+
+    // A public page that redirects to another public page still renders the
+    // target. This is the main-frame case: the redirect hop is answered with
+    // a 200 and the final page must be shown.
+    let target = html_server(
+        "<html><head><title>Final</title></head><body>REDIRECT-FINAL-PAGE</body></html>",
+    );
+    let public_top = redirect_server(&format!("http://127.0.0.1:{target}/target"));
+    set_test_public_ports(&[public_top, target]);
+    let page = render_page(
+        url::Url::parse(&format!("http://127.0.0.1:{public_top}/top")).unwrap(),
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("the public redirect should render");
+    assert!(
+        page.text.contains("REDIRECT-FINAL-PAGE"),
+        "a public redirect did not render the target: {page:?}"
     );
 
     shutdown_renderer();
