@@ -73,7 +73,8 @@ sudo apt-get install -y \
     fonts-dejavu-core
 ```
 
-With those installed, `cargo build --release` and `cargo test` work. The
+With those installed, `cargo fmt`, `cargo clippy`, `cargo test` and
+`cargo build --no-default-features` work (the same checks CI runs). The
 render tests need a GL implementation; on a headless machine set
 `LIBGL_ALWAYS_SOFTWARE=1` so Mesa uses its software rasterizer.
 

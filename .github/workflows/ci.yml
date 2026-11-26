@@ -39,6 +39,7 @@ jobs:
           # The merge base of a pull request must be in the clone for the
           # diff below.
           fetch-depth: 0
+          persist-credentials: false
       - name: Classify changed files
         id: filter
         env:
@@ -51,7 +52,7 @@ jobs:
             echo "rust=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          changed="$(git diff --name-only "$BASE_SHA" HEAD)"
+          changed="$(git diff --no-renames --name-only "$BASE_SHA" HEAD)"
           echo "Changed files:"
           printf '%s\n' "$changed"
           rust=false
@@ -60,6 +61,11 @@ jobs:
               continue
             fi
             case "$file" in
+              # Rust sources always run the build, even if a later pattern
+              # (such as *.md) would otherwise match them.
+              src/*|tests/*)
+                rust=true
+                ;;
               # Paths that cannot affect the Rust build.
               skills/*|plugins/*|.claude-plugin/*|.agents/*|scripts/*|*.md)
                 ;;
@@ -81,6 +87,8 @@ jobs:
       LIBGL_ALWAYS_SOFTWARE: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Free disk space
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
@@ -124,6 +132,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
         with:
           cache: false
@@ -143,6 +153,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check generated skills are in sync
         run: |
           if [ -f scripts/sync-skills.sh ]; then
@@ -188,14 +200,20 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Check required jobs
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          RUST: ${{ needs.changes.outputs.rust }}
+          LINUX: ${{ needs.linux.result }}
+          MACOS: ${{ needs.macos.result }}
+          VALIDATE: ${{ needs.validate.result }}
         run: |
-          echo "changes:  ${{ needs.changes.result }}"
-          echo "linux:    ${{ needs.linux.result }}"
-          echo "macos:    ${{ needs.macos.result }}"
-          echo "validate: ${{ needs.validate.result }}"
-          if [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] || \
-             [ "${{ contains(needs.*.result, 'cancelled') }}" = "true" ]; then
-            echo "::error::one or more required jobs failed"
+          echo "changes: $CHANGES  rust: $RUST  linux: $LINUX  macos: $MACOS  validate: $VALIDATE"
+          if [ "$CHANGES" != "success" ] || [ "$VALIDATE" != "success" ]; then
+            echo "::error::changes or validate did not succeed"
+            exit 1
+          fi
+          if [ "$RUST" = "true" ] && { [ "$LINUX" != "success" ] || [ "$MACOS" != "success" ]; }; then
+            echo "::error::Rust jobs must both succeed (linux=$LINUX macos=$MACOS)"
             exit 1
           fi
           echo "All required jobs passed."
