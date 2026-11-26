@@ -19,11 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Redirects are now checked. In default mode a redirect hop that Servo would
-  follow is re-requested by this crate, with check_destination and
-  redirect_decision on every hop and the final response handed back to the
-  render, so a redirect to a private address is refused. The first hop is
-  requested twice and cookies set by intermediate redirects are dropped. With
-  `allow_private_networks` set, Servo follows redirects as before.
+  follow is re-requested by this crate. Each hop's scheme and address are
+  checked and pinned before it is requested, and the final response is handed
+  back to the render, so a redirect to a private address is refused. The first
+  hop is requested twice. A redirect may move to another host when that host is
+  also public. Each hop is sent the page's cookies for its own URL, and each
+  hop's `Set-Cookie` is stored for the hops after it. HEAD stays HEAD, and
+  compressed bodies are decoded. A cross-origin script fetch that redirects is
+  refused. With `allow_private_networks` set, Servo follows redirects as before.
 
 ### Added
 

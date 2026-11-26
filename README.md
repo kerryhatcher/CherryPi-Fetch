@@ -136,14 +136,18 @@ captured no text, it fails (`ok:false`, exit 1).
   `user:pass@` is stripped from URLs. Use `--allow-private` (or
   `RendererConfig::allow_private_networks`) only for local testing.
 - **Redirects are re-fetched, not followed by Servo.** In default mode a
-  redirect hop that Servo would follow is re-requested by this crate, with
-  every hop and target checked, and the final response is handed back to the
-  render, so a redirect to a private address is refused. The first hop is
-  therefore requested twice, the request's existing cookies are sent on every
-  hop, cookies set by an intermediate redirect are discarded, and compressed
-  bodies are decoded. A cross-origin script fetch (fetch/XHR) that redirects
-  is refused outright, because the CORS check cannot be applied to an
-  intercepted hop.
+  redirect hop that Servo would follow is re-requested by this crate, and the
+  final response is handed back to the render. The first hop is therefore
+  requested twice. Each hop is checked before it is requested: its scheme, and
+  its address, which must be public (the request is then pinned to the
+  checked addresses). A redirect may move to another host, provided that host
+  is also public. Within a chain, each hop is sent the page's cookies for its
+  own URL, and each hop's `Set-Cookie` is stored for the hops after it. Only
+  GET and HEAD hops are followed (a HEAD stays HEAD), compressed bodies are
+  decoded (gzip, brotli, deflate and zstd), and `user:pass@` is stripped from
+  each `Location`. A chain is limited to 10 redirects. A cross-origin script
+  fetch (fetch/XHR) that redirects is refused outright, because Servo's CORS
+  check cannot be applied to an intercepted hop.
 - **DNS rebinding is only partly closed.** Requests this crate makes itself
   are pinned to the addresses that were checked. The ones Servo makes are
   resolved again when it connects, so a server that changes its answer
@@ -203,6 +207,7 @@ is built around pages that misbehave:
 It returns text (and a JSON record with `--json`), not Markdown, a screenshot
 or a schema, and it does not crawl.
 
-The non-default `test-hooks` feature (used only by this crate's own
-integration tests) turns the private-address check off for host and port pairs a test names.
-Do not enable it in a published build.
+The non-default `test-hooks` feature turns the private-address check off for
+the host and port pairs a test names. This crate's own tests enable it through
+a dev-dependency, so it is not on for downstream users. Do not enable it in a
+published build.
