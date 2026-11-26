@@ -77,6 +77,22 @@ fn base64(data: &[u8]) -> String {
     out
 }
 
+/// A valid 1x1 transparent PNG, so an `onerror` means the file was refused
+/// rather than that the target was not an image.
+const PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xcf, 0xc0, 0x50,
+    0x0f, 0x00, 0x04, 0x85, 0x01, 0x80, 0x84, 0xa9, 0x8c, 0x21, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+    0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
+fn write_png() -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("cherrypi-fetch-test-{}.png", std::process::id()));
+    std::fs::write(&path, PNG).unwrap();
+    path
+}
+
 fn data_page(html: &str) -> url::Url {
     url::Url::parse(&format!(
         "data:text/html;base64,{}",
@@ -100,12 +116,15 @@ async fn blocks_private_and_non_http_destinations() {
     assert!(result.is_err(), "file: should be refused: {result:?}");
 
     // A `file:` subresource is refused, which the page sees as a load error.
-    let file_page = data_page(
+    // The target is a real PNG, so `onerror` proves the file was not read.
+    let png = write_png();
+    let file_page = data_page(&format!(
         "<html><body><div id='out'>before</div>\
-         <img src='file:///etc/hostname' \
+         <img src='file://{}' \
          onerror=\"document.getElementById('out').textContent='file-blocked'\">\
          </body></html>",
-    );
+        png.display()
+    ));
     let page = render_page(file_page, Duration::from_secs(10))
         .await
         .expect("the data: page should render");

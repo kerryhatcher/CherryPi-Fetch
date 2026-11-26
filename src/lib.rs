@@ -274,9 +274,10 @@ fn proxy_environment_variable() -> Option<String> {
     // `vars_os`, not `vars`: a non-UTF-8 variable elsewhere in the environment
     // must not panic the render.
     std::env::vars_os().find_map(|(name, value)| {
-        let upper = name.to_string_lossy().to_ascii_uppercase();
+        let name = name.to_string_lossy().to_string();
+        let upper = name.to_ascii_uppercase();
         (matches!(upper.as_str(), "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY") && !value.is_empty())
-            .then_some(upper)
+            .then_some(name)
     })
 }
 
@@ -289,6 +290,11 @@ async fn check_destination(url: &url::Url) -> Result<Vec<IpAddr>, String> {
     };
     let port = url.port_or_known_default().unwrap_or(0);
     let ips = resolve_addresses(host, port).await?;
+    // A test can mark a loopback port as public, so a redirect away from it
+    // can be exercised without a real public address.
+    if test_public_port(port) {
+        return Ok(ips);
+    }
     if let Some(ip) = ips.iter().find(|ip| !is_public_address(**ip)) {
         return Err(format!(
             "refusing to fetch a non-public address for {host}: {ip} is loopback, private or \
@@ -313,6 +319,35 @@ pub fn strip_userinfo(mut url: url::Url) -> url::Url {
 /// without touching real DNS.
 #[cfg(test)]
 static TEST_RESOLVER: Mutex<Option<HashMap<String, Vec<IpAddr>>>> = Mutex::new(None);
+
+/// Ports an integration test has marked as public. See [`set_test_public_ports`].
+#[cfg(feature = "test-hooks")]
+static TEST_PUBLIC_PORTS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+
+/// Mark ports as public for the address check, so an integration test can
+/// point a redirect at loopback from a "public" origin. A test hook behind
+/// the non-default `test-hooks` feature, not for general use.
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub fn set_test_public_ports(ports: &[u16]) {
+    if let Ok(mut guard) = TEST_PUBLIC_PORTS.lock() {
+        *guard = ports.to_vec();
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+fn test_public_port(port: u16) -> bool {
+    TEST_PUBLIC_PORTS
+        .lock()
+        .map(|guard| guard.contains(&port))
+        .unwrap_or(false)
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn test_public_port(port: u16) -> bool {
+    let _ = port;
+    false
+}
 
 #[cfg(test)]
 fn test_resolver_lookup(host: &str) -> Option<Vec<IpAddr>> {
@@ -470,6 +505,15 @@ fn time_left(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
 }
 
+/// A human-readable budget: milliseconds under a second, whole seconds above.
+fn budget_label(timeout: Duration) -> String {
+    if timeout.as_secs() >= 1 {
+        format!("{} seconds", timeout.as_secs())
+    } else {
+        format!("{} ms", timeout.as_millis())
+    }
+}
+
 /// Start the render thread on first use and return a sender for its jobs.
 fn renderer() -> Result<mpsc::Sender<Job>, String> {
     let mut guard = RENDERER
@@ -625,10 +669,6 @@ struct ProxiedResponse {
 
 type ProxyResult = Result<ProxiedResponse, String>;
 
-/// A reqwest redirect policy that turns a redirect into a private address or
-/// to a different host into an error, instead of following it or handing the
-/// 3xx back to the page. Only the first hop was checked, so only same-host
-/// redirects are followed.
 /// Whether a redirect from `from_host` to `next` is allowed. Pure, so the
 /// policy can be unit-tested in default mode.
 fn redirect_decision(from_host: &str, next: &url::Url, allow_private: bool) -> Result<(), String> {
@@ -646,6 +686,10 @@ fn redirect_decision(from_host: &str, next: &url::Url, allow_private: bool) -> R
     Ok(())
 }
 
+/// A reqwest redirect policy that turns a redirect into a private address or
+/// to a different host into an error, instead of following it or handing the
+/// 3xx back to the page. Only the first hop was checked, so only same-host
+/// redirects are followed.
 fn redirect_policy(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Action {
     let from_host = attempt
         .previous()
@@ -728,7 +772,7 @@ impl Proxy {
         self.last_activity = Some(Instant::now());
         let host = url.host_str().unwrap_or_default().to_string();
         let tx = self.check_tx.clone();
-        self.runtime.spawn(async move {
+        let handle = self.runtime.spawn(async move {
             let result = match tokio::time::timeout(REQUEST_TIMEOUT, check_destination(&url)).await
             {
                 Ok(result) => result,
@@ -736,6 +780,7 @@ impl Proxy {
             };
             let _ = tx.send((id, result));
         });
+        self.tasks.insert(id, handle);
     }
 
     /// Hand finished checks back. A refused load becomes a network error in
@@ -745,6 +790,7 @@ impl Proxy {
             let Some(load) = self.checking.remove(&id) else {
                 continue;
             };
+            self.tasks.remove(&id);
             self.last_activity = Some(Instant::now());
             match result {
                 Ok(addrs) => self.dispatch(servo, load, &addrs),
@@ -1079,14 +1125,14 @@ fn render_one(
     let snap = snapshot.borrow();
     let stalled = snap.pending
         && last_sample.is_some_and(|sent| Instant::now().duration_since(sent) >= STALL_AFTER);
-    let secs = job.timeout.as_secs();
+    let secs = budget_label(job.timeout);
     if snap.samples == 0 {
         drop(snap);
         cancel_pending(&mut proxy, &delegate);
         return Err(if stalled {
-            format!("page scripts stopped responding before any text could be read (waited {secs} seconds)")
+            format!("page scripts stopped responding before any text could be read (waited {secs})")
         } else {
-            format!("page did not finish loading within {secs} seconds")
+            format!("page did not finish loading within {secs}")
         });
     }
     let text = normalize_text(&sanitize_control(&snap.text));
@@ -1094,7 +1140,7 @@ fn render_one(
         None
     } else if text.is_empty() {
         Some(format!(
-            "the page showed no readable text after {secs} seconds. The site may be blocking \
+            "the page showed no readable text after {secs}. The site may be blocking \
              automated browsers, or the page may need a login. Fetching it again is unlikely to help."
         ))
     } else if stalled {
@@ -1105,16 +1151,16 @@ fn render_one(
         )
     } else if loaded_at.is_none() {
         Some(format!(
-            "the page was still loading after {secs} seconds. Some content may be missing."
+            "the page was still loading after {secs}. Some content may be missing."
         ))
     } else if !proxy.in_flight.is_empty() {
         Some(format!(
-            "the page was still waiting on {} of its own requests after {secs} seconds. Some content may be missing.",
+            "the page was still waiting on {} of its own requests after {secs}. Some content may be missing.",
             proxy.in_flight.len()
         ))
     } else {
         Some(format!(
-            "the page was still changing after {secs} seconds. Some content may be missing."
+            "the page was still changing after {secs}. Some content may be missing."
         ))
     };
     let title = sanitize_control(&snap.title)
@@ -1304,6 +1350,18 @@ mod tests {
     // in one test.
     #[tokio::test(flavor = "multi_thread")]
     async fn renders_pages() {
+        // A proxy in the environment would route Servo's own local requests
+        // through it, so clear it before the first render.
+        for name in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            std::env::remove_var(name);
+        }
         let config = RendererConfig {
             user_agent: "cherrypi-fetch-test/1.0".into(),
             // The local test servers listen on 127.0.0.1.

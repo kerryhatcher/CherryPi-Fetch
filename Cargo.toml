@@ -25,6 +25,8 @@ include = [
 default = ["cli"]
 # The `cherrypi-fetch` command-line tool. Library users can turn it off.
 cli = ["dep:clap", "dep:serde", "dep:serde_json", "dep:tracing-subscriber"]
+# Test-only hooks for the integration tests. Not part of the public API.
+test-hooks = []
 
 [[bin]]
 name = "cherrypi-fetch"

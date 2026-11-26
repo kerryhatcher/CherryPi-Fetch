@@ -18,22 +18,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- A same-origin script GET that redirects to another host now fails with a
-  network error instead of following the redirect. A redirect to a non-public
-  address is refused either way. With `allow_private_networks` set, redirects
-  are followed again.
+- A redirect that the crate's own client follows now refuses a non-public
+  address or a different host, and fails the request instead of following it.
+  With `allow_private_networks` set, redirects are followed again.
 
 ### Added
 
 - Private, loopback and link-local destinations are refused by default, for
-  the page, every resource it loads and every redirect, after DNS resolution.
-  Only `http` and `https` are fetched (`data`, `blob` and `about` are allowed
-  locally; other schemes, including `file:`, are refused). Proxy environment
-  variables are refused, and `user:pass@` is stripped from URLs.
+  the page and every resource it loads, after DNS resolution. Only `http` and
+  `https` are fetched (`data`, `blob` and `about` are allowed locally; other
+  schemes, including `file:`, are refused). Proxy environment variables are
+  refused, and `user:pass@` is stripped from URLs.
   `--allow-private` and `RendererConfig::allow_private_networks` opt out for
   local testing.
+- `strip_userinfo` is public, so a caller can strip credentials the same way
+  the CLI does.
 - Requests this crate makes itself are pinned to the addresses that were
   checked, so a second DNS answer cannot move the connection.
+
+### Known issues
+
+- A redirect followed by Servo's own loader is not re-checked: the embedder
+  only sees the original URL, so a public URL that redirects to a private one
+  is still followed. Tracked as N1.
 
 ## [0.1.0] - 2026-11-26
 
