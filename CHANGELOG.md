@@ -35,6 +35,9 @@ Initial release: the `cherrypi-fetch` library and CLI, moved out of CherryPi's
     `shutdown_renderer`;
   - timeouts bounded to 1–600 seconds; `--max-chars` truncates text on
     request.
+- Page titles and text are stripped of C0 and C1 control characters other
+  than newline and tab, and of the bidi overrides and isolates, so a page
+  cannot inject terminal escapes or reorder a caller's output.
 - CLI `--json` records and exit codes: 0 when every page rendered fully, 1
   when at least one failed (even if others were incomplete) or the arguments
   were bad, 2 when at least one was incomplete and none failed.

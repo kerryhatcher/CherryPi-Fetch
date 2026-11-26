@@ -677,7 +677,7 @@ fn render_one(
             format!("page did not finish loading within {secs} seconds")
         });
     }
-    let text = normalize_text(&snap.text);
+    let text = normalize_text(&sanitize_control(&snap.text));
     let incomplete = if settled {
         None
     } else if text.is_empty() {
@@ -706,7 +706,7 @@ fn render_one(
         ))
     };
     Ok(RenderedPage {
-        title: snap.title.trim().to_string(),
+        title: sanitize_control(&snap.title).trim().to_string(),
         text,
         incomplete,
     })
@@ -719,6 +719,14 @@ fn normalize_text(text: &str) -> String {
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Remove C0 and C1 control characters other than newline and tab, so a page
+/// cannot inject terminal escape sequences into a caller's output.
+fn sanitize_control(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .collect()
 }
 
 fn string_field(fields: &HashMap<String, JSValue>, key: &str) -> String {
@@ -767,6 +775,16 @@ mod tests {
         document.cookie = 'left=1; Max-Age=3600';\
         localStorage.setItem('left', '1');\
         sessionStorage.setItem('left', '1');\
+        </script></body></html>";
+
+    /// A page whose title and text carry terminal escapes: ESC, the C1 CSI
+    /// (U+009B) and an OSC.
+    const ESCAPES: &str = "<html><head><title>Escapes</title></head><body>\
+        <div id='out'>before</div>\
+        <script>\
+        var esc = String.fromCharCode(27), bel = String.fromCharCode(7), csi = String.fromCharCode(155);\
+        document.title = 'esc' + esc + '[31mred' + esc + '[0m';\
+        document.getElementById('out').textContent = 'a' + esc + '[2Jb' + esc + ']0;title' + bel + 'c' + csi + '31md';\
         </script></body></html>";
 
     /// Serve `page` at `/`. `/hang` never answers, and `/cookies` echoes the
@@ -897,6 +915,29 @@ mod tests {
             );
         }
 
+        // A page can put terminal escape sequences into its title and text.
+        // The library strips the control characters before returning them.
+        let page = render_page(serve(ESCAPES), Duration::from_secs(60))
+            .await
+            .expect("render should succeed");
+        let has_control = |s: &str| s.chars().any(|c| c.is_control() && c != '\n' && c != '\t');
+        assert!(
+            !has_control(&page.title),
+            "title kept a control character: {:?}",
+            page.title
+        );
+        assert!(
+            !has_control(&page.text),
+            "text kept a control character: {:?}",
+            page.text
+        );
+        assert_eq!(page.title, "esc[31mred[0m");
+        assert!(
+            page.text.contains("a[2Jb]0;titlec31md"),
+            "text was: {:?}",
+            page.text
+        );
+
         let url = url::Url::parse("http://127.0.0.1:9/").unwrap();
         for bad in [
             Duration::ZERO,
@@ -938,5 +979,14 @@ mod tests {
     #[test]
     fn normalizes_text_lines() {
         assert_eq!(normalize_text("  a   b \n\n \t\n c\n"), "a b\nc");
+    }
+
+    #[test]
+    fn strips_control_characters_but_keeps_newlines_and_tabs() {
+        assert_eq!(
+            sanitize_control("a\u{1b}[31mb\u{9b}c\td\ne"),
+            "a[31mbc\td\ne"
+        );
+        assert_eq!(sanitize_control("no\u{0}controls\u{7f}"), "nocontrols");
     }
 }
