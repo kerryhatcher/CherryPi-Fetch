@@ -1,0 +1,196 @@
+name: CI
+
+# Build the Servo renderer, lint and test it, and check that it still
+# packages. `/pull_request_target` is deliberately never used.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# This workflow only reads the repository.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Keep `target/` inside the runner's disk: the debug binary carries ~1.2 GB
+# of debug info locally, and incremental artifacts add more.
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # Decide whether the (slow) Servo matrix is needed. A pull request that
+  # only touches docs, skills, plugins or scripts skips it; everything else
+  # runs the full build.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge base of a pull request must be in the clone for the
+          # diff below.
+          fetch-depth: 0
+      - name: Classify changed files
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "Not a pull request; running the Rust matrix."
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --name-only "$BASE_SHA" HEAD)"
+          echo "Changed files:"
+          printf '%s\n' "$changed"
+          rust=false
+          while IFS= read -r file; do
+            if [ -z "$file" ]; then
+              continue
+            fi
+            case "$file" in
+              # Paths that cannot affect the Rust build.
+              skills/*|plugins/*|.claude-plugin/*|.agents/*|scripts/*|*.md)
+                ;;
+              *)
+                rust=true
+                ;;
+            esac
+          done <<< "$changed"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux (ubuntu-24.04)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      # Mesa's software rasterizer, so the headless Servo render tests run.
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo apt-get clean
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config clang libclang-dev \
+            libfontconfig1-dev libegl1-mesa-dev libegl1 libgl1-mesa-dri \
+            fonts-dejavu-core
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        with:
+          # rust-toolchain.toml selects the toolchain; the cache is managed
+          # by Swatinem/rust-cache below.
+          cache: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: linux
+          cache-on-failure: true
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      - name: Build without default features
+        run: cargo build --no-default-features --locked
+      - name: Publish dry run
+        run: cargo publish --dry-run --locked
+
+  macos:
+    name: macOS (macos-15)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: macos
+          cache-on-failure: true
+      - name: Build and test
+        run: cargo test --locked
+
+  # Cheap checks that stand in for the Rust matrix on docs/plugin-only pull
+  # requests (and run alongside it otherwise).
+  validate:
+    name: Validate docs and plugins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check generated skills are in sync
+        run: |
+          if [ -f scripts/sync-skills.sh ]; then
+            bash scripts/sync-skills.sh
+            if [ -n "$(git status --porcelain)" ]; then
+              echo "::error::skills are out of date; run scripts/sync-skills.sh and commit the result"
+              git --no-pager diff
+              exit 1
+            fi
+            echo "Skills are in sync."
+          else
+            echo "scripts/sync-skills.sh is not present yet; skipping."
+          fi
+      - name: Validate JSON
+        run: |
+          set -euo pipefail
+          files="$(git ls-files '*.json')"
+          if [ -z "$files" ]; then
+            echo "No JSON files to validate."
+            exit 0
+          fi
+          while IFS= read -r file; do
+            if [ -z "$file" ]; then
+              continue
+            fi
+            echo "validating $file"
+            if command -v jq >/dev/null 2>&1; then
+              jq empty "$file"
+            else
+              python3 -m json.tool "$file" >/dev/null
+            fi
+          done <<< "$files"
+
+  # Always-present gate with a fixed name for branch protection. It passes
+  # when every job that ran passed and no required job failed or was
+  # cancelled; the Rust jobs are allowed to be skipped for docs-only
+  # changes.
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [changes, linux, macos, validate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check required jobs
+        run: |
+          echo "changes:  ${{ needs.changes.result }}"
+          echo "linux:    ${{ needs.linux.result }}"
+          echo "macos:    ${{ needs.macos.result }}"
+          echo "validate: ${{ needs.validate.result }}"
+          if [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] || \
+             [ "${{ contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "::error::one or more required jobs failed"
+            exit 1
+          fi
+          echo "All required jobs passed."
