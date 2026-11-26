@@ -663,6 +663,7 @@ dependencies = [
 name = "cherrypi-fetch"
 version = "0.1.0"
 dependencies = [
+ "cherrypi-fetch",
  "clap",
  "content-security-policy",
  "cookie 0.18.3",

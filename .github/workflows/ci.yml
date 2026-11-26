@@ -96,6 +96,8 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Clippy (test-hooks)
+        run: cargo clippy --all-targets --features test-hooks --locked -- -D warnings
       - name: Test
         run: cargo test --locked
       # The redirect hook lives behind a non-default feature, so its test runs

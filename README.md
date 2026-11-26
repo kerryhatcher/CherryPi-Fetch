@@ -139,8 +139,11 @@ captured no text, it fails (`ok:false`, exit 1).
   redirect hop that Servo would follow is re-requested by this crate, with
   every hop and target checked, and the final response is handed back to the
   render, so a redirect to a private address is refused. The first hop is
-  therefore requested twice, and cookies set by an intermediate redirect are
-  discarded.
+  therefore requested twice, the request's existing cookies are sent on every
+  hop, cookies set by an intermediate redirect are discarded, and compressed
+  bodies are decoded. A cross-origin script fetch (fetch/XHR) that redirects
+  is refused outright, because the CORS check cannot be applied to an
+  intercepted hop.
 - **DNS rebinding is only partly closed.** Requests this crate makes itself
   are pinned to the addresses that were checked. The ones Servo makes are
   resolved again when it connects, so a server that changes its answer
@@ -199,3 +202,7 @@ is built around pages that misbehave:
 
 It returns text (and a JSON record with `--json`), not Markdown, a screenshot
 or a schema, and it does not crawl.
+
+The non-default `test-hooks` feature (used only by this crate's own
+integration tests) turns the private-address check off for ports a test names.
+Do not enable it in a published build.

@@ -6,8 +6,6 @@
 //! ```sh
 //! cargo test --features test-hooks --test redirect
 //! ```
-#![cfg(feature = "test-hooks")]
-
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};

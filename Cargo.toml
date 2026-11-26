@@ -56,3 +56,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optio
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
 pkg-fmt = "tgz"
 bin-dir = "{ bin }{ binary-ext }"
+
+# F7: only this crate's own tests turn the address-check bypass on.
+[dev-dependencies]
+cherrypi-fetch = { path = ".", features = ["test-hooks"] }

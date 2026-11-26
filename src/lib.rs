@@ -292,6 +292,7 @@ async fn check_destination(url: &url::Url) -> Result<Vec<IpAddr>, String> {
     let ips = resolve_addresses(host, port).await?;
     // A test can mark a loopback port as public, so a redirect away from it
     // can be exercised without a real public address.
+    #[cfg(feature = "test-hooks")]
     if test_public_port(port) {
         return Ok(ips);
     }
@@ -390,6 +391,8 @@ const HOP_BY_HOP: &[&str] = &[
     "keep-alive",
     "transfer-encoding",
     "content-length",
+    // reqwest decodes the body, so the header no longer describes it.
+    "content-encoding",
 ];
 
 /// Script run in the page to read its title and visible text. `innerText`
@@ -682,9 +685,7 @@ fn redirect_decision(from_host: &str, next: &url::Url, allow_private: bool) -> R
             return Err("a redirect to a non-public address".to_string());
         }
     }
-    if !allow_private && host != from_host {
-        return Err("a redirect to a different host".to_string());
-    }
+    let _ = from_host;
     Ok(())
 }
 
@@ -773,10 +774,20 @@ impl Proxy {
         // check every hop. A non-GET hop is refused outright.
         if load.request.is_redirect {
             let method = load.request.method.as_str();
-            if method == "GET" || method == "HEAD" {
-                self.start_redirect(load);
-            } else {
+            // A cross-origin script fetch (fetch/XHR) would skip Servo's CORS
+            // check on an intercepted hop, so refuse it.
+            let cross_origin = load
+                .request
+                .referrer_url
+                .as_ref()
+                .map(|r| r.as_url().origin() != url.origin())
+                .unwrap_or(true);
+            if (method != "GET" && method != "HEAD")
+                || (load.request.destination == Destination::None && cross_origin)
+            {
                 cancel_load(load);
+            } else {
+                self.start_redirect(load);
             }
             return;
         }
@@ -989,9 +1000,13 @@ async fn fetch_redirect_chain(url: url::Url, headers: HeaderMap) -> ProxyResult 
             .get(reqwest::header::LOCATION)
             .and_then(|value| value.to_str().ok())
             .ok_or_else(|| "a redirect response had no Location".to_string())?;
-        let next = url.join(location).map_err(|e| e.to_string())?;
+        let next = strip_userinfo(url.join(location).map_err(|e| e.to_string())?);
         check_scheme(&next)?;
-        if !test_public_port(next.port_or_known_default().unwrap_or(0)) {
+        #[cfg(feature = "test-hooks")]
+        let test_public = test_public_port(next.port_or_known_default().unwrap_or(0));
+        #[cfg(not(feature = "test-hooks"))]
+        let test_public = false;
+        if !test_public {
             redirect_decision(url.host_str().unwrap_or_default(), &next, false)?;
         }
         url = next;
@@ -1635,14 +1650,14 @@ mod tests {
     }
 
     #[test]
-    fn redirect_decision_allows_public_same_host_only() {
+    fn redirect_decision_refuses_private_literals() {
         let private = url::Url::parse("http://127.0.0.1:9/").unwrap();
         assert!(redirect_decision("example.com", &private, false).is_err());
         assert!(redirect_decision("example.com", &private, true).is_ok());
 
+        // A host change is allowed: check_destination guards the next hop.
         let other = url::Url::parse("http://other.example/").unwrap();
-        assert!(redirect_decision("example.com", &other, false).is_err());
-        assert!(redirect_decision("example.com", &other, true).is_ok());
+        assert!(redirect_decision("example.com", &other, false).is_ok());
 
         let same = url::Url::parse("http://example.com/next").unwrap();
         assert!(redirect_decision("example.com", &same, false).is_ok());
