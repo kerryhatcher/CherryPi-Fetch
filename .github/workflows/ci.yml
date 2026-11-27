@@ -67,7 +67,7 @@ jobs:
                 rust=true
                 ;;
               # Paths that cannot affect the Rust build.
-              skills/*|plugins/*|.claude-plugin/*|.agents/*|scripts/*|*.md)
+              skills/*|plugins/*|.claude-plugin/*|.agents/*|scripts/*|*.md|package.json)
                 ;;
               *)
                 rust=true
@@ -133,17 +133,15 @@ jobs:
           persist-credentials: false
       - name: Check generated skills are in sync
         run: |
-          if [ -f scripts/sync-skills.sh ]; then
-            bash scripts/sync-skills.sh
-            if [ -n "$(git status --porcelain)" ]; then
-              echo "::error::skills are out of date; run scripts/sync-skills.sh and commit the result"
-              git --no-pager diff
-              exit 1
-            fi
-            echo "Skills are in sync."
-          else
-            echo "scripts/sync-skills.sh is not present yet; skipping."
+          bash scripts/sync-skills.sh
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::skills are out of date; run scripts/sync-skills.sh and commit the result"
+            git --no-pager diff
+            exit 1
           fi
+          echo "Skills are in sync."
+      - name: Check plugin versions match Cargo.toml
+        run: bash scripts/check-plugin-versions.sh
       - name: Validate JSON
         run: |
           set -euo pipefail

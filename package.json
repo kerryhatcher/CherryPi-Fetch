@@ -1,0 +1,33 @@
+{
+  "name": "cherrypi-fetch-pi",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Pi package for cherrypi-fetch: a fetch_page tool that renders JavaScript-heavy pages in Servo.",
+  "license": "MIT",
+  "homepage": "https://github.com/kerryhatcher/CherryPi-Fetch",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kerryhatcher/CherryPi-Fetch.git"
+  },
+  "keywords": [
+    "pi-package",
+    "cherrypi-fetch",
+    "servo",
+    "web-fetch"
+  ],
+  "files": [
+    "plugins/pi/extensions",
+    "plugins/pi/skills",
+    "plugins/README.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": ["./plugins/pi/extensions/cherrypi-fetch.ts"],
+    "skills": ["./plugins/pi/skills"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}
