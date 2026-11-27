@@ -69,6 +69,19 @@ last snapshot taken. A failed record has `ok:false`, with `title` and `text`
 (even if others were incomplete) or the arguments were bad; 2 when at least
 one was incomplete and none failed.
 
+## MCP server
+
+Run `cherrypi-fetch mcp` as a stdio MCP server. Its `fetch_page` tool renders
+HTTP and HTTPS pages and returns their title and visible text. Private and
+loopback addresses are blocked by default; for local testing, start the server
+with `cherrypi-fetch mcp --allow-private`.
+
+To smoke-test the tool list with MCP Inspector:
+
+```sh
+npx @modelcontextprotocol/inspector --cli cherrypi-fetch mcp --method tools/list
+```
+
 ## Library
 
 ```rust
@@ -76,6 +89,7 @@ one was incomplete and none failed.
 async fn demo() -> Result<(), cherrypi_fetch::RenderError> {
     cherrypi_fetch::configure(cherrypi_fetch::RendererConfig {
         user_agent: "MyTool/1.0".into(),
+        ..Default::default()
     })?; // optional; call before the first render
     let url = url::Url::parse("https://example.com/").unwrap();
     let result = cherrypi_fetch::render_page(url, cherrypi_fetch::RENDER_TIMEOUT).await;

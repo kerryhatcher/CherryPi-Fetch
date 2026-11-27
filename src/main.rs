@@ -67,7 +67,11 @@ struct Args {
 #[derive(Subcommand)]
 enum Command {
     /// Serve `fetch_page` to MCP clients over stdio (stdout carries only JSON-RPC)
-    Mcp,
+    Mcp {
+        /// Allow loopback, private and other non-public addresses for local testing
+        #[arg(long)]
+        allow_private: bool,
+    },
 }
 
 /// One URL's result, as printed with `--json`.
@@ -120,15 +124,15 @@ async fn main() -> ExitCode {
     init_logging();
 
     #[cfg(feature = "mcp")]
-    if matches!(args.command, Some(Command::Mcp)) {
+    if let Some(Command::Mcp { allow_private }) = args.command {
         // Never returns: it exits the process once the server has stopped.
-        mcp::serve_stdio().await;
+        mcp::serve_stdio(allow_private).await;
     }
     // `mcp` only works on its own. After options, clap reads it as a URL, so say what happened.
     #[cfg(feature = "mcp")]
     if args.urls.len() == 1 && args.urls[0] == "mcp" {
         eprintln!(
-            "cherrypi-fetch: `mcp` is a subcommand, not a URL, and takes no options. \
+            "cherrypi-fetch: `mcp` is a subcommand, not a URL. \
              Run `cherrypi-fetch mcp` by itself."
         );
         return ExitCode::from(1);
@@ -307,9 +311,21 @@ mod tests {
         #[cfg(feature = "mcp")]
         {
             let args = Args::try_parse_from(["cherrypi-fetch", "mcp"]).unwrap();
-            assert!(matches!(args.command, Some(Command::Mcp)));
+            assert!(matches!(
+                args.command,
+                Some(Command::Mcp {
+                    allow_private: false
+                })
+            ));
+            let args = Args::try_parse_from(["cherrypi-fetch", "mcp", "--allow-private"]).unwrap();
+            assert!(matches!(
+                args.command,
+                Some(Command::Mcp {
+                    allow_private: true
+                })
+            ));
             assert!(args.urls.is_empty());
-            // `mcp` takes no URLs and no options: clap rejects both after it.
+            // `mcp` takes no URLs or default-mode options.
             assert!(Args::try_parse_from(["cherrypi-fetch", "mcp", "https://a.test/"]).is_err());
             assert!(Args::try_parse_from(["cherrypi-fetch", "mcp", "--json"]).is_err());
             // Before it, an option is parsed and `mcp` is read as a URL. main() reports that.

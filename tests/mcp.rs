@@ -92,9 +92,13 @@ impl Drop for Server {
 }
 
 impl Server {
-    fn start() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_cherrypi-fetch"))
-            .arg("mcp")
+    fn start(allow_private: bool) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cherrypi-fetch"));
+        command.arg("mcp");
+        if allow_private {
+            command.arg("--allow-private");
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -218,8 +222,8 @@ fn parse_json_rpc(line: &str) -> Value {
 }
 
 /// Run the handshake the MCP lifecycle requires before any other request.
-fn start_session() -> Server {
-    let mut server = Server::start();
+fn start_session_with(allow_private: bool) -> Server {
+    let mut server = Server::start(allow_private);
     let init = server.request(
         "initialize",
         json!({
@@ -236,6 +240,10 @@ fn start_session() -> Server {
     );
     server.notify("notifications/initialized", Value::Null);
     server
+}
+
+fn start_session() -> Server {
+    start_session_with(true)
 }
 
 fn call_fetch(server: &mut Server, arguments: Value) -> Value {
@@ -313,6 +321,20 @@ fn serves_tools_list_and_fetches_a_page_over_stdio() {
 
     let status = server.finish();
     assert_eq!(status.code(), Some(0), "closing stdin exits 0");
+}
+
+#[test]
+fn loopback_is_blocked_by_default_and_allowed_with_flag() {
+    let url = serve();
+    let mut blocked = start_session_with(false);
+    let result = call_fetch(&mut blocked, json!({"url": url}));
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(blocked.finish().code(), Some(0));
+
+    let mut allowed = start_session_with(true);
+    let result = call_fetch(&mut allowed, json!({"url": url}));
+    assert_eq!(result["structuredContent"]["title"], "MCP Test", "{result}");
+    assert_eq!(allowed.finish().code(), Some(0));
 }
 
 #[test]

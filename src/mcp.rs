@@ -29,7 +29,8 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 const TOOL_DESCRIPTION: &str = "Render a web page in Servo, a real browser engine, and return \
     its title and visible text. Use it when the page needs JavaScript: a single-page app, or a \
     page whose plain fetch comes back empty or says it is loading. An invalid argument or a \
-    page that cannot be rendered is reported as a tool error.";
+    page that cannot be rendered is reported as a tool error. Private and loopback addresses are \
+    blocked unless the server starts with mcp --allow-private.";
 
 /// `structuredContent` of a successful `fetch_page` call. Its schema is the tool's `outputSchema`.
 #[derive(Serialize, JsonSchema)]
@@ -113,9 +114,6 @@ impl FetchServer {
         request: FetchRequest,
         context: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        // TODO(#12): once RendererConfig has allow_private_networks, pass it
-        // through here. The --allow-private flag must then also be accepted
-        // with `mcp`, which means relaxing args_conflicts_with_subcommands.
         let cancelled = || tool_error("the call was cancelled before its render started");
         let _render = if let Ok(guard) = self.render_lock.try_lock() {
             guard
@@ -277,7 +275,14 @@ fn tool_error(message: impl Into<String>) -> CallToolResult {
 /// This ends the process itself rather than returning. The Tokio runtime waits
 /// for its blocking threads when `main` returns, and the thread reading stdin
 /// cannot be interrupted, so a signal with stdin still open would hang there.
-pub async fn serve_stdio() -> ! {
+pub async fn serve_stdio(allow_private: bool) -> ! {
+    if let Err(e) = cherrypi_fetch::configure(cherrypi_fetch::RendererConfig {
+        allow_private_networks: allow_private,
+        ..Default::default()
+    }) {
+        eprintln!("cherrypi-fetch: MCP configuration failed: {e}");
+        std::process::exit(1);
+    }
     let server = FetchServer::default();
     let busy = server.render_lock.clone();
     let service = match server.serve(stdio()).await {
