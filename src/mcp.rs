@@ -199,7 +199,7 @@ fn parse_request(arguments: Option<&JsonObject>) -> Result<FetchRequest, String>
         ));
     }
 
-    let max_chars = match optional_integer(arguments, "max_chars")? {
+    let max_chars = match optional_clamped_integer(arguments, "max_chars", MAX_CHARS_LIMIT)? {
         None => DEFAULT_MAX_CHARS,
         Some(0) => return Err("max_chars must be at least 1".to_string()),
         Some(n) => usize::try_from(n.min(MAX_CHARS_LIMIT)).unwrap_or(usize::MAX),
@@ -228,6 +228,23 @@ fn optional_integer(arguments: &JsonObject, key: &str) -> Result<Option<u64>, St
     whole
         .map(Some)
         .ok_or_else(|| format!("{key} must be a whole number"))
+}
+
+/// Clamp before conversion so large finite JSON integers remain valid.
+fn optional_clamped_integer(
+    arguments: &JsonObject,
+    key: &str,
+    limit: u64,
+) -> Result<Option<u64>, String> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0)
+            .map(|n| Some(n.min(limit as f64) as u64))
+            .ok_or_else(|| format!("{key} must be a whole number")),
+        _ => Err(format!("{key} must be a whole number")),
+    }
 }
 
 /// Successful output: a text block the reader can scan, and the structured record.
@@ -417,6 +434,9 @@ mod tests {
     #[test]
     fn max_chars_is_clamped_to_the_limit_and_zero_is_refused() {
         let request = parse(json!({"url": "https://a.test/", "max_chars": 300_000})).unwrap();
+        assert_eq!(request.max_chars, 200_000);
+        let huge: Value = serde_json::from_str("18446744073709551616").unwrap();
+        let request = parse(json!({"url": "https://a.test/", "max_chars": huge})).unwrap();
         assert_eq!(request.max_chars, 200_000);
         let request = parse(json!({"url": "https://a.test/", "max_chars": 1})).unwrap();
         assert_eq!(request.max_chars, 1);
