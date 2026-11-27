@@ -147,8 +147,12 @@ captured no text, it fails (`ok:false`, exit 1).
   page script (XHR or fetch) is fetched by this crate, so a synchronous XHR to
   a server that never answers gets a timeout. It is sent the page's cookies,
   follows only same-origin redirects (301, 302, 303, 307 and 308 with a
-  `Location`), and is limited to 10 redirects. A cross-origin script fetch that
-  redirects is left to Servo, which applies CORS. Pages that send
+  `Location`), and is limited to 10 redirects. A script fetch whose redirect
+  leaves the page's origin is handed back to Servo, which makes the request again
+  and follows the redirect with CORS, as a browser does. That costs one extra
+  request for the first URL, and for any same-origin hops before the
+  cross-origin one. A script fetch that starts cross-origin is left to Servo from
+  the start. Pages that send
   `Referrer-Policy: no-referrer` get no such timeout: their script requests are
   not recognised as same-origin, so they are left to Servo.
 - **Credentials are refused.** A URL that carries `user:pass@` is refused

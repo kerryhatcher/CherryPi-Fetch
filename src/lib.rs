@@ -788,7 +788,22 @@ struct ProxiedResponse {
     body: Vec<u8>,
 }
 
-type ProxyResult = Result<ProxiedResponse, String>;
+/// Why a proxied request produced no response.
+enum ProxyError {
+    /// The request failed, and the page sees a network error.
+    Failed(String),
+    /// A script request's redirect reached another origin. Servo applies CORS to
+    /// that hop, so the load goes back to Servo, which makes the request itself.
+    CrossOrigin,
+}
+
+impl From<String> for ProxyError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+type ProxyResult = Result<ProxiedResponse, ProxyError>;
 
 /// A request from a redirect chain to the render thread, which alone can read
 /// and write Servo's cookie jar. The chain is async and runs on the runtime, so
@@ -986,7 +1001,9 @@ impl Proxy {
     }
 
     /// Proxy a same-origin script GET. Its redirects are followed by
-    /// [`fetch_redirect_chain`], never by reqwest, and it stays in its origin.
+    /// [`fetch_redirect_chain`], never by reqwest, and it stays in its origin
+    /// until a redirect leaves it. Then the load goes back to Servo (see
+    /// [`Proxy::deliver_finished`]).
     fn start(&mut self, load: WebResourceLoad) {
         let request = &load.request;
         let url = strip_userinfo(request.url.clone().into_url());
@@ -1020,10 +1037,10 @@ impl Proxy {
             let result = tokio::time::timeout(REQUEST_TIMEOUT, fetch_redirect_chain(url, chain))
                 .await
                 .unwrap_or_else(|_| {
-                    Err(format!(
+                    Err(ProxyError::Failed(format!(
                         "no response within {} seconds",
                         REQUEST_TIMEOUT.as_secs()
-                    ))
+                    )))
                 });
             let _ = done.send((id, result));
         });
@@ -1077,7 +1094,14 @@ impl Proxy {
                     }
                     intercepted.finish();
                 }
-                Err(e) => {
+                Err(ProxyError::CrossOrigin) => {
+                    // Not cancelled: Servo fetches the load again, this time
+                    // itself, and follows the redirect with CORS. Its connections
+                    // still go through the checking proxy.
+                    tracing::debug!(host = %load.request.url.as_url().host_str().unwrap_or_default(), "handed a cross-origin script redirect back to Servo");
+                    release(load);
+                }
+                Err(ProxyError::Failed(e)) => {
                     tracing::debug!(host = %load.request.url.as_url().host_str().unwrap_or_default(), error = %e, "page request failed");
                     cancel_load(load);
                 }
@@ -1090,8 +1114,9 @@ impl Proxy {
 struct Chain {
     headers: HeaderMap,
     cookies: CookieLink,
-    /// The origin the script request must stay in. A redirect that leaves it is
-    /// refused: Servo's CORS check does not run on a response it did not fetch.
+    /// The origin the script request must stay in. A redirect that leaves it ends
+    /// the chain with [`ProxyError::CrossOrigin`]: Servo's CORS check does not run
+    /// on a response it did not fetch, so Servo makes that request instead.
     script_origin: url::Origin,
     /// Whether each hop's address is checked. Off only with
     /// `allow_private_networks`, for local testing.
@@ -1104,11 +1129,18 @@ struct Chain {
 /// hop is sent the jar's cookies for its own URL, and each hop's `Set-Cookie` is
 /// stored for the hops after it. The first hop is requested the same way, so the
 /// same rules apply to it.
+///
+/// A hop that leaves `chain.script_origin` ends the chain with
+/// [`ProxyError::CrossOrigin`], before anything is requested from it. The
+/// caller then releases the load to Servo, which makes the request again from the
+/// first URL and follows the redirects itself, with CORS. So the first URL, and
+/// any same-origin hops before the cross-origin one, are requested twice. That
+/// happens only for a script request that redirects out of its origin.
 async fn fetch_redirect_chain(url: url::Url, chain: Chain) -> ProxyResult {
     let mut url = url;
     for _ in 0..MAX_REDIRECTS {
         if url.origin() != chain.script_origin {
-            return Err("a script request was redirected to another origin".to_string());
+            return Err(ProxyError::CrossOrigin);
         }
         let addrs = if chain.check_addresses {
             check_destination(&url).await?
@@ -1137,7 +1169,9 @@ async fn fetch_redirect_chain(url: url::Url, chain: Chain) -> ProxyResult {
         // anything is requested from it.
         url = strip_userinfo(url.join(location).map_err(|e| e.to_string())?);
     }
-    Err(format!("more than {MAX_REDIRECTS} redirects"))
+    Err(ProxyError::Failed(format!(
+        "more than {MAX_REDIRECTS} redirects"
+    )))
 }
 
 /// Build the client for one proxied request. It never follows a redirect: the
@@ -1215,7 +1249,9 @@ async fn fetch(client: reqwest::Client, url: url::Url, mut headers: HeaderMap) -
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
         if body.len() + chunk.len() > MAX_PROXY_BODY {
-            return Err(format!("response body exceeds {MAX_PROXY_BODY} bytes"));
+            return Err(ProxyError::Failed(format!(
+                "response body exceeds {MAX_PROXY_BODY} bytes"
+            )));
         }
         body.extend_from_slice(&chunk);
     }

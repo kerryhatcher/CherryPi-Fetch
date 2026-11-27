@@ -23,6 +23,7 @@ mod redirect_cors;
 mod redirect_cross_host;
 mod redirect_gzip;
 mod redirect_method;
+mod redirect_release;
 mod redirect_statuses;
 mod redirect_subresources;
 mod redirect_taint;
@@ -63,6 +64,10 @@ async fn render_scenarios() {
     scenario!(
         failed,
         redirect_gzip::compressed_bodies_are_delivered_decoded
+    );
+    scenario!(
+        failed,
+        redirect_release::a_same_origin_script_redirect_to_another_origin_follows_cors
     );
     scenario!(
         failed,
