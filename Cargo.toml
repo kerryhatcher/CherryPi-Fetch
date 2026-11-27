@@ -71,4 +71,4 @@ bin-dir = "{ bin }{ binary-ext }"
 # Only this crate's own tests turn the address-check bypass on: the dev-dependency
 # enables the __test-hooks feature for `cargo test`, and downstream users never see it.
 [dev-dependencies]
-cherrypi-fetch = { path = ".", features = ["__test-hooks"] }
+cherrypi-fetch = { path = ".", default-features = false, features = ["__test-hooks"] }
