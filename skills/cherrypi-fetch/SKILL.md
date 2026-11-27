@@ -78,8 +78,9 @@ Exit status:
 
 ## Install
 
-If the binary is missing, or older than 0.2.0 (`cherrypi-fetch --version`;
-the `mcp` server and `fetch_page` need 0.2.0), install it:
+If the binary is missing, install it. The MCP server (`cherrypi-fetch mcp`,
+used by Claude Code and Codex) needs 0.2.0 or later; check with
+`cherrypi-fetch --version`. The Pi extension runs the CLI and works with 0.1.x.
 
 ```sh
 cargo binstall cherrypi-fetch           # prebuilt binary, no Servo build

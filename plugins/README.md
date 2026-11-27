@@ -5,8 +5,8 @@ hosts. Each one calls the `cherrypi-fetch` binary that must already be on
 `PATH`:
 
 ```sh
-cargo binstall cherrypi-fetch   # prebuilt binary, no Servo build
-cargo install --locked cherrypi-fetch    # build from source
+cargo binstall cherrypi-fetch           # prebuilt binary, no Servo build
+cargo install --locked cherrypi-fetch   # build from source
 ```
 
 The skill lives once at [`../skills/cherrypi-fetch/SKILL.md`](../skills/cherrypi-fetch/SKILL.md).
