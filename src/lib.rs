@@ -1092,6 +1092,7 @@ struct Chain {
     cookies: CookieLink,
     /// The origin the script request must stay in. A redirect that leaves it is
     /// refused: Servo's CORS check does not run on a response it did not fetch.
+    /// See https://github.com/kerryhatcher/CherryPi-Fetch/issues/19.
     script_origin: url::Origin,
     /// Whether each hop's address is checked. Off only with
     /// `allow_private_networks`, for local testing.

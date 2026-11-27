@@ -133,7 +133,7 @@ captured no text, it fails (`ok:false`, exit 1).
   including `file:`, is refused). The page and every resource it loads must
   resolve to a public address. Loopback, private and link-local addresses
   (including cloud metadata services such as 169.254.169.254) are blocked, and
-  `user:pass@` is stripped from URLs. Use `--allow-private` (or
+  `user:pass@` is stripped from the initial URL. Use `--allow-private` (or
   `RendererConfig::allow_private_networks`) only for local testing.
 - **Servo's own connections go through a checking proxy.** Servo sends every
   http and https connection through a proxy that this crate runs on
@@ -147,14 +147,17 @@ captured no text, it fails (`ok:false`, exit 1).
   page script (XHR or fetch) is fetched by this crate, so a synchronous XHR to
   a server that never answers gets a timeout. It is sent the page's cookies,
   follows only same-origin redirects (301, 302, 303, 307 and 308 with a
-  `Location`), and is limited to 10 redirects. A cross-origin script fetch that
-  redirects is left to Servo, which applies CORS. Pages that send
+  `Location`), and is limited to 10 redirects. A same-origin script request
+  (XHR or fetch) whose redirect leaves its origin fails with a network error,
+  unlike a browser, because the proxy keeps the 8-second synchronous XHR
+  deadline; see [issue #19](https://github.com/kerryhatcher/CherryPi-Fetch/issues/19).
+  A cross-origin script fetch that redirects is left to Servo, which applies
+  CORS. Pages that send
   `Referrer-Policy: no-referrer` get no such timeout: their script requests are
   not recognised as same-origin, so they are left to Servo.
-- **Credentials are refused.** A URL that carries `user:pass@` is refused
-  before Servo fetches it. Servo's own fetch of a top-level redirect to such a
-  URL never completes, and the credentials must not reach a host that named
-  them in a redirect. The render then reports a failure after its budget.
+- **Inspected credentials are refused.** The embedder refuses inspected request
+  URLs containing `user:pass@`. On redirect hops the interceptor sees the original
+  URL, so this check does not cover redirect targets.
 - **The WebSocket connection is the one place DNS rebinding remains.** Servo
   connects a WebSocket itself, without the proxy. The handshake is checked
   before it is sent, but the connection is resolved again, so a server that
