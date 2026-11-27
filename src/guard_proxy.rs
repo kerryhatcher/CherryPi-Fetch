@@ -67,6 +67,7 @@ static TUNNELS: AtomicU64 = AtomicU64::new(0);
 
 /// How many tunnels the proxy has opened, so a test can show that a request
 /// went through the check.
+#[cfg_attr(not(feature = "__test-hooks"), allow(dead_code))]
 pub(crate) fn tunnels_opened() -> u64 {
     TUNNELS.load(Ordering::Relaxed)
 }
