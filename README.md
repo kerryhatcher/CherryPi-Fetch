@@ -76,6 +76,9 @@ HTTP and HTTPS pages and returns their title and visible text. Private and
 loopback addresses are blocked by default; for local testing, start the server
 with `cherrypi-fetch mcp --allow-private`.
 
+The `max_chars` and `timeout_secs` arguments must be JSON numbers representable
+as finite doubles. Fractional parts below double precision are rounded.
+
 To smoke-test the tool list with MCP Inspector:
 
 ```sh
@@ -242,4 +245,4 @@ the host and port pairs a test names. This crate's own tests enable it through
 a dev-dependency, so it is not on for downstream users. Do not enable it in a
 published build.
 
-Servo load failures are detected using its error templates. A page that imitates a Servo error page after an error template has been loaded during its render can be reported as a failed load.
+Servo load failures are detected by matching the top-level DOM against Servo’s error-page templates. A page that imitates one is reported as a failed load.

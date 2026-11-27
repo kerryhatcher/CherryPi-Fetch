@@ -161,13 +161,13 @@ fn input_schema() -> JsonObject {
                 "minimum": 1,
                 "maximum": 600,
                 "default": 20,
-                "description": "Seconds allowed for the page to load and settle, from 1 to 600. Default 20."
+                "description": "Seconds allowed for the page to load and settle, from 1 to 600. Default 20. Must be a JSON number representable as a finite double; fractional parts below double precision are rounded."
             },
             "max_chars": {
                 "type": "integer",
                 "minimum": 1,
                 "default": 40000,
-                "description": "Keep at most this many characters of text, from 1 to 200000. Larger values are clamped to 200000. Default 40000."
+                "description": "Keep at most this many characters of text, from 1 to 200000. Larger values are clamped to 200000. Default 40000. Must be a JSON number representable as a finite double; fractional parts below double precision are rounded."
             }
         },
         "required": ["url"]
