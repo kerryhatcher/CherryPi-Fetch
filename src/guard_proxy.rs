@@ -56,14 +56,20 @@ impl GuardProxy {
         format!("http://{USERNAME}:{}@{}", self.token, self.addr)
     }
 
+    #[cfg(test)]
     pub(crate) fn addr(&self) -> SocketAddr {
         self.addr
     }
 }
 
-/// Tunnels the proxy has opened since the process started, for the debug
-/// counters and tests.
+/// Tunnels the proxy has opened since the process started.
 static TUNNELS: AtomicU64 = AtomicU64::new(0);
+
+/// How many tunnels the proxy has opened, so a test can show that a request
+/// went through the check.
+pub(crate) fn tunnels_opened() -> u64 {
+    TUNNELS.load(Ordering::Relaxed)
+}
 
 /// Shared by every connection the proxy accepts.
 struct State {

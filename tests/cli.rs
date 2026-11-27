@@ -138,7 +138,8 @@ fn does_not_echo_credentials_for_rejected_urls() {
 }
 
 #[test]
-fn refuses_to_render_when_a_proxy_is_set() {
+fn a_proxy_in_the_environment_is_ignored() {
+    // The loopback page is refused for its address, not because a proxy is set.
     let url = serve();
     let output = cherrypi_fetch()
         .env("HTTP_PROXY", "http://127.0.0.1:1")
@@ -147,7 +148,8 @@ fn refuses_to_render_when_a_proxy_is_set() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("HTTP_PROXY"), "{stdout}");
+    assert!(stdout.contains("non-public"), "{stdout}");
+    assert!(!stdout.contains("HTTP_PROXY"), "{stdout}");
 }
 
 #[cfg(unix)]

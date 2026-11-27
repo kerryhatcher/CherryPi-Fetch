@@ -47,8 +47,6 @@ use servo::{
     WebResourceResponse, WebView, WebViewBuilder, WebViewDelegate,
 };
 
-// Wired into the renderer in the next commit.
-#[cfg_attr(not(test), allow(dead_code))]
 mod guard_proxy;
 
 /// User-Agent sent when [`configure`] is not called. It claims Windows on
@@ -272,19 +270,6 @@ fn check_scheme(url: &url::Url) -> Result<(), String> {
     }
 }
 
-/// The first proxy environment variable that is set, if any. Servo's own
-/// network stack honours these too, so they move requests off the checked path.
-fn proxy_environment_variable() -> Option<String> {
-    // `vars_os`, not `vars`: a non-UTF-8 variable elsewhere in the environment
-    // must not panic the render.
-    std::env::vars_os().find_map(|(name, value)| {
-        let name = name.to_string_lossy().to_string();
-        let upper = name.to_ascii_uppercase();
-        (matches!(upper.as_str(), "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY") && !value.is_empty())
-            .then_some(name)
-    })
-}
-
 /// Ports that browsers never connect to on the web, from the Fetch standard's
 /// bad-port list. Servo applies the same list to the requests it makes (see
 /// `should_request_be_blocked_due_to_a_bad_port` in servo-net 0.8.0,
@@ -445,6 +430,14 @@ fn test_resolver_lookup(host: &str) -> Option<Vec<IpAddr>> {
     answers.get(index).or(answers.last()).cloned()
 }
 
+/// How many connections Servo has tunnelled through the checking proxy. A test
+/// hook: it shows that a request really went through the check.
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub fn proxied_tunnel_count() -> u64 {
+    guard_proxy::tunnels_opened()
+}
+
 /// Time allowed for one page to load and settle.
 pub const RENDER_TIMEOUT: Duration = Duration::from_secs(20);
 /// Longest timeout [`render_page`] accepts.
@@ -553,12 +546,6 @@ pub async fn render_page(url: url::Url, timeout: Duration) -> Result<RenderedPag
         return Err(RenderError::Failed(e));
     }
     if !allow_private_networks() {
-        if let Some(name) = proxy_environment_variable() {
-            return Err(RenderError::Failed(format!(
-                "{name} is set, so requests could go through an un-checked proxy; unset it or \
-                 allow private networks for local testing"
-            )));
-        }
         match tokio::time::timeout(time_left(deadline), check_destination(&url)).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => return Err(RenderError::Failed(e)),
@@ -650,8 +637,49 @@ fn render_thread(jobs: mpsc::Receiver<Job>) {
     // component may already have installed one, so a failure here is ignored.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+    // The checking proxy runs on its own runtime, which lives as long as this
+    // thread. It is declared first, so it is dropped after Servo.
+    let proxy_runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            let message = format!("failed to start the address-check proxy: {e}");
+            for job in jobs {
+                let _ = job.reply.send(Err(message.clone()));
+            }
+            return;
+        }
+    };
+    let proxy = match proxy_runtime.block_on(guard_proxy::start(guard_proxy::Settings {
+        allow_private: allow_private_networks(),
+        head_timeout: Duration::from_secs(10),
+        check_timeout: REQUEST_TIMEOUT,
+        connect_timeout: REQUEST_TIMEOUT,
+        idle_timeout: Duration::from_secs(60),
+    })) {
+        Ok(proxy) => proxy,
+        Err(e) => {
+            let message = format!("failed to start the address-check proxy: {e}");
+            for job in jobs {
+                let _ = job.reply.send(Err(message.clone()));
+            }
+            return;
+        }
+    };
+
+    // Servo sends every http and https connection through the proxy, which
+    // checks each destination when it connects. These three preferences replace
+    // the environment's proxy settings, which `Preferences::default()` would
+    // otherwise copy in, so a proxy variable cannot take a request out of the
+    // check.
     let prefs = Preferences {
         user_agent: user_agent().to_string(),
+        network_http_proxy_uri: proxy.url(),
+        network_https_proxy_uri: proxy.url(),
+        network_http_no_proxy: String::new(),
         ..Default::default()
     };
     let servo = ServoBuilder::default()
