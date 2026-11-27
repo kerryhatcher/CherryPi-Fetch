@@ -13,6 +13,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -80,6 +84,7 @@ struct Server {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: Receiver<std::io::Result<String>>,
+    stderr: Receiver<String>,
     next_id: u64,
 }
 
@@ -121,9 +126,20 @@ impl Server {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (err_tx, err_rx) = mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                if let Ok(line) = line {
+                    let _ = err_tx.send(line);
+                } else {
+                    break;
+                }
+            }
+        });
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
@@ -132,6 +148,7 @@ impl Server {
             child,
             stdin,
             stdout: rx,
+            stderr: err_rx,
             next_id: 0,
         }
     }
@@ -414,41 +431,66 @@ fn unknown_tools_are_protocol_errors() {
 
 #[test]
 fn a_cancelled_call_waiting_for_the_renderer_never_renders() {
-    let page = serve();
-    let hang = format!("{page}{HANG_PATH}");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let page = format!("http://{}/", listener.local_addr().unwrap());
+    let count = Arc::new(AtomicUsize::new(0));
+    let observed = count.clone();
+    let (held_tx, held_rx) = mpsc::channel();
+    thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let observed = observed.clone();
+            let held_tx = held_tx.clone();
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line.starts_with("GET /held ") {
+                    let _ = held_tx.send(());
+                    thread::sleep(Duration::from_secs(60));
+                } else {
+                    if line.starts_with("GET /cancelled ") {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let mut stream = stream;
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{PAGE}", PAGE.len());
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+        }
+    });
     let mut server = start_session();
-
-    // The first call holds the renderer until its own 3-second timeout ends the render.
     let first = server.send_request(
         "tools/call",
-        json!({"name": "fetch_page", "arguments": {"url": hang, "timeout_secs": 3}}),
+        json!({"name":"fetch_page", "arguments":{"url":format!("{page}held"), "timeout_secs":3}}),
     );
-    thread::sleep(Duration::from_millis(500));
-    // The second call queues behind it. Had it rendered, it would run for 20 seconds.
-    let queued = server.send_request(
-        "tools/call",
-        json!({"name": "fetch_page", "arguments": {"url": hang, "timeout_secs": 20}}),
-    );
-    thread::sleep(Duration::from_millis(500));
+    held_rx
+        .recv_timeout(WAIT)
+        .expect("first request did not reach server");
+    let queued = server.send_request("tools/call", json!({"name":"fetch_page", "arguments":{"url":format!("{page}cancelled"), "timeout_secs":3}}));
+    loop {
+        let line = server
+            .stderr
+            .recv_timeout(WAIT)
+            .expect("queued handler did not report waiting");
+        if line.contains("waiting for an earlier render") {
+            break;
+        }
+    }
     server.notify(
         "notifications/cancelled",
-        json!({"requestId": queued, "reason": "test"}),
+        json!({"requestId":queued, "reason":"test"}),
     );
-
     let first_response = server.wait_response(first);
     assert_eq!(
         first_response["result"]["isError"], true,
         "{first_response}"
     );
-
-    // The renderer is free again. A fresh call must not wait out the cancelled one.
-    let started = Instant::now();
     let result = call_fetch(&mut server, json!({"url": page}));
-    let waited = started.elapsed();
     assert_eq!(result["structuredContent"]["title"], "MCP Test", "{result}");
-    assert!(
-        waited < Duration::from_secs(15),
-        "the cancelled call still rendered: the next call took {waited:?}"
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        0,
+        "cancelled route was requested"
     );
 
     let status = server.finish();
