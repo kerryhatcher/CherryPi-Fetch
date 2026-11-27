@@ -197,8 +197,9 @@ that lists every dependency and its license text.
 project that owns the `servo-fetch` name on crates.io. It is a much larger
 tool: it renders to Markdown, JSON or PNG screenshots, crawls sites, maps
 URLs from sitemaps, and ships a Rust library, Python and Node.js SDKs, an MCP
-server and a Docker image. Both projects block private and reserved
-addresses by default and strip credentials from input URLs.
+server and a Docker image. Its README says it blocks private and reserved IP
+ranges and strips credentials from URLs; `cherrypi-fetch` now does both by
+default too.
 
 `cherrypi-fetch` is deliberately smaller and focused on one job: return a
 page's title and visible text to a caller that may be an agent. Its behaviour

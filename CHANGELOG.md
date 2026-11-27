@@ -33,7 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Private, loopback and link-local destinations are refused by default, for
-  the page and every resource it loads, when they connect. Only `http` and
+  the page and every resource it loads, when they connect (a WebSocket is
+  resolved again after its check; see the README). Only `http` and
   `https` are fetched (`data`, `blob` and `about` are allowed locally; other
   schemes, including `file:`, are refused). Ports on the Fetch standard's
   bad-port list are refused. `user:pass@` is stripped from the input URL.

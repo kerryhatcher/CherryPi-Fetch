@@ -905,8 +905,8 @@ impl Proxy {
             return;
         }
         // A URL with credentials is refused before Servo sees it. Servo's own
-        // fetch of a top-level redirect to such a URL never completes (it
-        // stalls without a network request), and the page must not carry the
+        // fetch of a top-level redirect to such a URL can fail to finish within
+        // the render budget, and the page must not carry the
         // credentials to a host that named them in a redirect.
         if !url.username().is_empty() || url.password().is_some() {
             tracing::debug!(host = %url.host_str().unwrap_or_default(), "refused a URL with credentials");
