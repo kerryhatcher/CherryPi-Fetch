@@ -22,9 +22,9 @@ Do not use it to get past a CAPTCHA, a paywall or a login.
 
 ## How to use it
 
-1. Prefer the `fetch_page` MCP tool when it is available. It takes `url` and
-   optional `timeout_secs` and `max_chars`, and returns the same record as the
-   CLI's `--json` output.
+1. Prefer the `fetch_page` tool when it is available: the MCP server and the
+   Pi package both expose it. It takes `url` and optional `timeout_secs` and
+   `max_chars`, and returns the same record as the CLI's `--json` output.
 2. Otherwise run the CLI and read the exit code:
 
 ```sh
