@@ -212,6 +212,8 @@ impl Server {
 }
 
 fn parse_json_rpc(line: &str) -> Value {
+    assert!(!line.contains("syntheticuser"), "username leaked on stdout");
+    assert!(!line.contains("syntheticpass"), "password leaked on stdout");
     let message: Value = serde_json::from_str(line)
         .unwrap_or_else(|e| panic!("stdout line is not JSON ({e}): {line:?}"));
     assert_eq!(
@@ -287,7 +289,10 @@ fn serves_tools_list_and_fetches_a_page_over_stdio() {
         );
     }
 
-    let result = call_fetch(&mut server, json!({"url": url}));
+    let credential_url = url.replacen("http://", "http://syntheticuser:syntheticpass@", 1);
+    let result = call_fetch(&mut server, json!({"url": credential_url}));
+    assert!(!result.to_string().contains("syntheticuser"));
+    assert!(!result.to_string().contains("syntheticpass"));
     assert!(
         result.get("isError").is_none() || result["isError"] == false,
         "{result}"

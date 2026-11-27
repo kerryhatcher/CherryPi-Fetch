@@ -52,7 +52,6 @@ struct FetchPageOutput {
 /// A validated `fetch_page` call.
 #[derive(Debug, PartialEq)]
 struct FetchRequest {
-    raw_url: String,
     url: url::Url,
     timeout: Duration,
     max_chars: usize,
@@ -134,11 +133,12 @@ impl FetchServer {
         // abort a load. A cancel that arrives now runs the render to its end,
         // and its result is dropped.
         let started = Instant::now();
+        let response_url = request.url.to_string();
         let rendered = cherrypi_fetch::render_page(request.url, request.timeout).await;
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         drop(_render);
         match rendered {
-            Ok(page) => success(request.raw_url, page, request.max_chars, elapsed_ms),
+            Ok(page) => success(response_url, page, request.max_chars, elapsed_ms),
             Err(e) => tool_error(format!("render failed: {e}")),
         }
     }
@@ -206,7 +206,6 @@ fn parse_request(arguments: Option<&JsonObject>) -> Result<FetchRequest, String>
     };
 
     Ok(FetchRequest {
-        raw_url,
         url,
         timeout: Duration::from_secs(timeout_secs),
         max_chars,
