@@ -483,19 +483,26 @@ const HOP_BY_HOP: &[&str] = &[
 /// style, and template content removed.
 const SNAPSHOT_SCRIPT: &str = "(function () {\
     var query = Element.prototype.querySelector;\
+    var queryAll = Element.prototype.querySelectorAll;\
+    var clone = Node.prototype.cloneNode;\
+    var remove = Node.prototype.removeChild;\
+    var startsWith = String.prototype.startsWith;\
     var body = document.body;\
     var title = document.title;\
     if (!body) { return {title: title, text: '', error_page: ''}; }\
     var text = body.innerText;\
     if (typeof text !== 'string') {\
-        var copy = body.cloneNode(true);\
-        copy.querySelectorAll('script, style, noscript, template').forEach(function (node) { node.remove(); });\
+        var copy = clone.call(body, true);\
+        var excluded = queryAll.call(copy, 'script, style, noscript, template');\
+        for (var i = 0; i < excluded.length; i++) {\
+            if (excluded[i].parentNode) { remove.call(excluded[i].parentNode, excluded[i]); }\
+        }\
         text = copy.textContent;\
     }\
     var error = false;\
     try {\
         var paragraph = query.call(body, 'p');\
-        error = (title === 'Error loading page' && paragraph && paragraph.textContent.startsWith('Could not load the requested page:')) ||\
+        error = (title === 'Error loading page' && paragraph && startsWith.call(paragraph.textContent, 'Could not load the requested page:')) ||\
             (title === 'Certificate error' && query.call(body, '#leave') && query.call(body, '#allow') && query.call(body, '#bytes')) ||\
             (paragraph && paragraph.textContent === 'Servo crashed!' && query.call(body, 'button') && query.call(body, 'pre plaintext'));\
     } catch (_) { error = false; }\
