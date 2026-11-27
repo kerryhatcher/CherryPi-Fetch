@@ -68,14 +68,19 @@ Exit status:
   hunt for mirrors or alternate sources unless the user asked for one.
 - If `truncated` is true, the text was cut at `max_chars`. Raise the limit only
   when the missing tail matters.
+- Loopback, private and link-local addresses (`localhost`, `10.x`, `192.168.x`,
+  cloud metadata) are refused by default, and the result says so. Don't retry
+  them. They work only if the user started the server with
+  `cherrypi-fetch mcp --allow-private` or runs the CLI with `--allow-private`,
+  which is for local testing.
 
 ## Install
 
 If the binary is missing, install it:
 
 ```sh
-cargo binstall cherrypi-fetch   # prebuilt binary, no Servo build
-cargo install cherrypi-fetch    # build from source
+cargo binstall cherrypi-fetch           # prebuilt binary, no Servo build
+cargo install --locked cherrypi-fetch   # build from source
 ```
 
 Prebuilt binaries exist for x86_64 Linux (glibc) and Apple-silicon macOS.
