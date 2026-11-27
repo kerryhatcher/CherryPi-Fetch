@@ -119,7 +119,7 @@ async fn classifies_main_document_loads() {
         "{error}"
     );
     let after = cherrypi_fetch::test_pending_cleanup_counts();
+    shutdown_renderer();
     assert!(after.0 > before.0, "pending load was not cancelled");
     assert!(after.1 > before.1, "pending task was not aborted");
-    shutdown_renderer();
 }
