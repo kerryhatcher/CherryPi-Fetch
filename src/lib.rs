@@ -482,18 +482,24 @@ const HOP_BY_HOP: &[&str] = &[
 /// available, it falls back to the text of a copy of the body with script,
 /// style, and template content removed.
 const SNAPSHOT_SCRIPT: &str = "(function () {\
+    var query = Element.prototype.querySelector;\
     var body = document.body;\
-    if (!body) { return {title: document.title, text: '', error_page: ''}; }\
+    var title = document.title;\
+    if (!body) { return {title: title, text: '', error_page: ''}; }\
     var text = body.innerText;\
     if (typeof text !== 'string') {\
         var copy = body.cloneNode(true);\
         copy.querySelectorAll('script, style, noscript, template').forEach(function (node) { node.remove(); });\
         text = copy.textContent;\
     }\
-    var error = (document.title === 'Error loading page' && body.querySelector('p') && body.querySelector('p').textContent.startsWith('Could not load the requested page:')) ||\
-        (document.title === 'Certificate error' && body.querySelector('#leave') && body.querySelector('#allow') && body.querySelector('#bytes')) ||\
-        (body.querySelector('p') && body.querySelector('p').textContent === 'Servo crashed!' && body.querySelector('button') && body.querySelector('pre plaintext'));\
-    return {title: document.title, text: text, error_page: error ? 'yes' : ''};\
+    var error = false;\
+    try {\
+        var paragraph = query.call(body, 'p');\
+        error = (title === 'Error loading page' && paragraph && paragraph.textContent.startsWith('Could not load the requested page:')) ||\
+            (title === 'Certificate error' && query.call(body, '#leave') && query.call(body, '#allow') && query.call(body, '#bytes')) ||\
+            (paragraph && paragraph.textContent === 'Servo crashed!' && query.call(body, 'button') && query.call(body, 'pre plaintext'));\
+    } catch (_) { error = false; }\
+    return {title: title, text: text, error_page: error ? 'yes' : ''};\
 })()";
 
 /// A rendered page: its title and the visible text, one line per block.

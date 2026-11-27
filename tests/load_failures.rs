@@ -24,6 +24,10 @@ async fn classifies_main_document_loads() {
                 )
             } else if request.starts_with("GET /origin ") {
                 ("", "<html><body>origin success<script>window.origin = 'null';</script></body></html>".to_string())
+            } else if request.starts_with("GET /shadow ") {
+                ("", "<html><body>shadow success<script>document.body.querySelector = undefined;</script></body></html>".to_string())
+            } else if request.starts_with("GET /prototype ") {
+                ("", "<html><body>prototype success<script>Element.prototype.querySelector = undefined;</script></body></html>".to_string())
             } else {
                 ("", "<html><body>iframe success<iframe src='http://127.0.0.1:9/'></iframe></body></html>".to_string())
             };
@@ -31,7 +35,7 @@ async fn classifies_main_document_loads() {
             let _ = stream.write_all(response.as_bytes());
         }
     });
-    for path in ["sandbox", "origin", "iframe"] {
+    for path in ["sandbox", "origin", "iframe", "shadow", "prototype"] {
         let page = render_page(
             format!("http://{addr}/{path}").parse().unwrap(),
             Duration::from_secs(10),
