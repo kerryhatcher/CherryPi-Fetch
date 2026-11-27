@@ -1,6 +1,6 @@
 [package]
 name = "cherrypi-fetch"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 authors = ["Kerry Hatcher"]
@@ -45,7 +45,7 @@ getrandom = "0.3"
 content-security-policy = "0.9"
 # gzip, brotli, deflate and zstd: the proxied requests decode compressed bodies,
 # so the page never receives a body it cannot read.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "gzip", "brotli", "deflate", "zstd"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots-no-provider", "http2", "gzip", "brotli", "deflate", "zstd"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 thiserror = "2"
