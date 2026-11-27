@@ -79,8 +79,28 @@ fn closed_url() -> String {
 struct Server {
     child: Child,
     stdin: Option<ChildStdin>,
-    stdout: Receiver<String>,
+    stdout: Receiver<std::io::Result<String>>,
     next_id: u64,
+}
+
+fn forward_stdout(reader: impl BufRead, tx: mpsc::Sender<std::io::Result<String>>) {
+    for line in reader.lines() {
+        let failed = line.is_err();
+        if tx.send(line).is_err() || failed {
+            break;
+        }
+    }
+}
+
+#[test]
+fn stdout_reader_reports_invalid_utf8() {
+    let (tx, rx) = mpsc::channel();
+    forward_stdout(std::io::Cursor::new(b"good\n\xff\n"), tx);
+    assert_eq!(rx.recv().unwrap().unwrap(), "good");
+    assert_eq!(
+        rx.recv().unwrap().unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
 }
 
 impl Drop for Server {
@@ -107,13 +127,7 @@ impl Server {
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
+        thread::spawn(move || forward_stdout(BufReader::new(stdout), tx));
         Self {
             child,
             stdin,
@@ -166,7 +180,7 @@ impl Server {
 
     fn next_message(&mut self) -> Value {
         match self.stdout.recv_timeout(WAIT) {
-            Ok(line) => parse_json_rpc(&line),
+            Ok(line) => parse_json_rpc(&line.expect("stdout read or UTF-8 error")),
             Err(e) => panic!("no stdout line from the server ({e:?})"),
         }
     }
@@ -190,7 +204,7 @@ impl Server {
         loop {
             match self.stdout.recv_timeout(Duration::from_secs(5)) {
                 Ok(line) => {
-                    parse_json_rpc(&line);
+                    parse_json_rpc(&line.expect("stdout read or UTF-8 error"));
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
                 Err(RecvTimeoutError::Timeout) => panic!("stdout stayed open after exit"),
