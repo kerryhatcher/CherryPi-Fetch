@@ -21,7 +21,7 @@ const EXIT_GRACE_MS = 10_000;
 
 const INSTALL_HINT = `Install cherrypi-fetch, then try again:
   cargo binstall cherrypi-fetch   # prebuilt binary, no Servo build
-  cargo install cherrypi-fetch    # build from source
+  cargo install --locked cherrypi-fetch    # build from source
 Prebuilt binaries exist for x86_64 Linux and Apple-silicon macOS. See
 https://github.com/kerryhatcher/CherryPi-Fetch#install`;
 

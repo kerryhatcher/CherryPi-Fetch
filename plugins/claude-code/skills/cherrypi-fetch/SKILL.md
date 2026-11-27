@@ -42,9 +42,10 @@ cherrypi-fetch --json --max-chars 40000 -- https://example.com/
 
 Put `--` before the URL so the URL cannot be read as an option.
 
-A render failure or an unsupported URL scheme prints one JSON record per URL
-to stdout and diagnostics to stderr. The record has `url`, `ok`, `title`,
-`text`, `incomplete`, `truncated`, `error` and `elapsed_ms`. An argument error
+With `--json`, every URL gets one JSON record on stdout, including a failed
+render, an unsupported scheme and a URL that can't be parsed. Diagnostics go
+to stderr. The record has `url`, `ok`, `title`, `text`, `incomplete`,
+`truncated`, `error` and `elapsed_ms`. An argument error (a bad option)
 prints nothing to stdout; the reason is on stderr.
 
 Exit status:
@@ -52,9 +53,10 @@ Exit status:
 - `0`: every page rendered fully.
 - `2`: at least one page did not settle and none failed. The record still has
   text, plus an `incomplete` reason.
-- `1`: at least one page failed, or the arguments were bad. A failed render or
-  a rejected URL scheme still prints an `ok:false` record with `error`. An
-  argument error prints no record; read stderr.
+- `1`: at least one page failed, or the arguments were bad. With `--json`, a
+  failed render, a rejected scheme or an unparsable URL still prints an
+  `ok:false` record with `error`. An argument error prints no record; read
+  stderr.
 
 ## How to read the result
 
@@ -76,7 +78,8 @@ Exit status:
 
 ## Install
 
-If the binary is missing, install it:
+If the binary is missing, or older than 0.2.0 (`cherrypi-fetch --version`;
+the `mcp` server and `fetch_page` need 0.2.0), install it:
 
 ```sh
 cargo binstall cherrypi-fetch           # prebuilt binary, no Servo build
