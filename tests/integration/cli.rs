@@ -207,7 +207,10 @@ fn closed_url() -> String {
 fn a_page_that_cannot_load_is_a_failed_render() {
     // Port 9 is a "bad port" that Servo refuses; the other is closed.
     for url in [closed_url(), "http://127.0.0.1:9/".to_string()] {
-        let output = cherrypi_fetch().args(["--json", &url]).output().unwrap();
+        let output = cherrypi_fetch()
+            .args(["--json", "--allow-private", &url])
+            .output()
+            .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let record: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON line");
         assert_eq!(record["ok"], false, "{url}: {record}");
@@ -222,7 +225,10 @@ fn a_page_that_cannot_load_is_a_failed_render() {
     }
 
     let url = closed_url();
-    let output = cherrypi_fetch().arg(&url).output().unwrap();
+    let output = cherrypi_fetch()
+        .args(["--allow-private", &url])
+        .output()
+        .unwrap();
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
