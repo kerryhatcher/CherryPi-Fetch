@@ -22,9 +22,11 @@ include = [
 ]
 
 [features]
-default = ["cli"]
+default = ["cli", "mcp"]
 # The `cherrypi-fetch` command-line tool. Library users can turn it off.
 cli = ["dep:clap", "dep:serde", "dep:serde_json", "dep:tracing-subscriber"]
+# `cherrypi-fetch mcp`, a stdio MCP server. It is part of the binary, not the library.
+mcp = ["cli", "dep:rmcp", "dep:schemars"]
 # Test-only hooks for the integration tests. Not part of the public API.
 __test-hooks = []
 
@@ -53,6 +55,10 @@ clap = { version = "4", features = ["derive"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
+# A caret requirement, so library users with `mcp` on are not forced onto one rmcp
+# patch release. Cargo.lock pins 3.12.0 for the binary; install with `--locked`.
+rmcp = { version = "3.12", default-features = false, features = ["server", "transport-io"], optional = true }
+schemars = { version = "1", optional = true }
 
 # Let `cargo binstall` fetch the prebuilt archive from the GitHub release
 # instead of building Servo. The archive root holds the binary, LICENSE, README
@@ -65,4 +71,4 @@ bin-dir = "{ bin }{ binary-ext }"
 # Only this crate's own tests turn the address-check bypass on: the dev-dependency
 # enables the __test-hooks feature for `cargo test`, and downstream users never see it.
 [dev-dependencies]
-cherrypi-fetch = { path = ".", features = ["__test-hooks"] }
+cherrypi-fetch = { path = ".", default-features = false, features = ["__test-hooks"] }

@@ -16,6 +16,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `RendererConfig` gained an `allow_private_networks` field, so a struct
   literal needs updating; `RendererConfig::default()` is unchanged.
 
+### Added
+
+- Private, loopback and link-local destinations are refused by default, for
+  the page and every resource it loads, when they connect (a WebSocket is
+  resolved again after its check; see the README). Only `http` and
+  `https` are fetched (`data`, `blob` and `about` are allowed locally; other
+  schemes, including `file:`, are refused). Ports on the Fetch standard's
+  bad-port list are refused. `user:pass@` is stripped from the input URL.
+  `--allow-private` and `RendererConfig::allow_private_networks` opt out for
+  local testing.
+- `strip_userinfo` is public, so a caller can strip credentials the same way
+  the CLI does.
+
+- `cherrypi-fetch mcp`, a stdio MCP server with one tool, `fetch_page`. It
+  renders a page in Servo and returns its title and text. Invalid input and a
+  failed render are tool errors (`isError`). The server is behind the `mcp`
+  feature, which is on by default. `--no-default-features --features cli`
+  builds the command without it.
+
 ### Changed
 
 - Servo's own connections go through a checking proxy. Each connection is
@@ -30,18 +49,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Redirect targets that Servo follows itself are not covered; see the README.
 - The non-default `test-hooks` feature is now `__test-hooks`.
 
-### Added
+- `rmcp` is a caret requirement (`3.12`), so library users are not pinned to
+  one patch release. Install with `cargo install --locked` to build with the
+  versions in `Cargo.lock`.
 
-- Private, loopback and link-local destinations are refused by default, for
-  the page and every resource it loads, when they connect (a WebSocket is
-  resolved again after its check; see the README). Only `http` and
-  `https` are fetched (`data`, `blob` and `about` are allowed locally; other
-  schemes, including `file:`, are refused). Ports on the Fetch standard's
-  bad-port list are refused. `user:pass@` is stripped from the input URL.
-  `--allow-private` and `RendererConfig::allow_private_networks` opt out for
-  local testing.
-- `strip_userinfo` is public, so a caller can strip credentials the same way
-  the CLI does.
+### Fixed
+
+- A page whose main document fails to load (connection refused, DNS failure,
+  a bad port, or a TLS error) is a failed render: `RenderError::Failed` with
+  Servo's reason, `ok:false` and exit 1 from the CLI, and `isError` from MCP.
+  It used to come back as `ok:true` with Servo's error page as the text.
+- `cherrypi-fetch mcp` exits on SIGTERM or SIGINT while its client keeps stdin
+  open. It waits at most two seconds for the service to stop, then stops
+  Servo. A render already in progress still finishes first, and the server
+  logs that to stderr.
+- A call that is cancelled while it waits for the renderer no longer renders
+  the page once its turn comes. A render that has started still runs to its
+  end, because Servo cannot abort a load.
+- `cherrypi-fetch --json mcp` (an option before `mcp`) explains that `mcp` is a
+  subcommand, rather than reporting an invalid URL.
+- The `fetch_page` input schema states the ranges and defaults, and whole
+  numbers sent as floats (`20.0`) are accepted.
+
 
 ## [0.1.1] - 2026-11-26
 

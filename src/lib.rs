@@ -481,16 +481,38 @@ const HOP_BY_HOP: &[&str] = &[
 /// are left out, along with script and style source. If `innerText` is not
 /// available, it falls back to the text of a copy of the body with script,
 /// style, and template content removed.
+///
+/// The fallback and the error-page check each run inside their own `try`,
+/// including the lookup of the prototype methods they use. Page script can
+/// make any of those lookups throw. A failed fallback gives empty text, and the
+/// title survives either way.
 const SNAPSHOT_SCRIPT: &str = "(function () {\
     var body = document.body;\
-    if (!body) { return {title: document.title, text: ''}; }\
+    var title = document.title;\
+    if (!body) { return {title: title, text: '', error_page: ''}; }\
     var text = body.innerText;\
     if (typeof text !== 'string') {\
-        var copy = body.cloneNode(true);\
-        copy.querySelectorAll('script, style, noscript, template').forEach(function (node) { node.remove(); });\
-        text = copy.textContent;\
+        try {\
+            var copy = Node.prototype.cloneNode.call(body, true);\
+            var remove = Node.prototype.removeChild;\
+            var excluded = Element.prototype.querySelectorAll.call(copy, 'script, style, noscript, template');\
+            for (var i = 0; i < excluded.length; i++) {\
+                if (excluded[i].parentNode) { remove.call(excluded[i].parentNode, excluded[i]); }\
+            }\
+            text = copy.textContent;\
+        } catch (_) { text = ''; }\
+        if (typeof text !== 'string') { text = ''; }\
     }\
-    return {title: document.title, text: text};\
+    var error = false;\
+    try {\
+        var query = Element.prototype.querySelector;\
+        var startsWith = String.prototype.startsWith;\
+        var paragraph = query.call(body, 'p');\
+        error = (title === 'Error loading page' && paragraph && startsWith.call(paragraph.textContent, 'Could not load the requested page:')) ||\
+            (title === 'Certificate error' && query.call(body, '#leave') && query.call(body, '#allow') && query.call(body, '#bytes')) ||\
+            (paragraph && paragraph.textContent === 'Servo crashed!' && query.call(body, 'button') && query.call(body, 'pre plaintext'));\
+    } catch (_) { error = false; }\
+    return {title: title, text: text, error_page: error ? 'yes' : ''};\
 })()";
 
 /// A rendered page: its title and the visible text, one line per block.
@@ -530,7 +552,8 @@ static RENDERER: Mutex<Lifecycle> = Mutex::new(Lifecycle::NotStarted);
 
 /// Render `url` in Servo and return its title and text. The page is loaded
 /// fresh every call. Errors cover startup failures, a page that never produced
-/// any text, and a render thread that does not answer. A page that loads but
+/// any text, a main document that did not load (connection refused, DNS
+/// failure, a bad port, TLS), and a render thread that does not answer. A page that loads but
 /// does not settle in time is returned with [`RenderedPage::incomplete`] set.
 ///
 /// Must be called from within a Tokio runtime, which also carries the HTTP
@@ -745,6 +768,8 @@ struct Snapshot {
     pending: bool,
     /// Successful samples received so far.
     samples: u32,
+    /// The top-level DOM matches one of Servo’s error templates.
+    error_page: bool,
 }
 
 /// Receives the page's resource requests. Every load is held until the render
@@ -1016,7 +1041,15 @@ impl Proxy {
         self.in_flight.insert(id, load);
         self.last_activity = Some(Instant::now());
         let done = self.done_tx.clone();
+        // Counts this task being dropped before it finished, which is what
+        // `abort()` does; a detached handle lets the task run to the end. It is
+        // made out here and moved in, so it is dropped even if the task is
+        // aborted before its first poll.
+        #[cfg(feature = "__test-hooks")]
+        let aborted = TaskAbortProbe(true);
         let handle = self.runtime.spawn(async move {
+            #[cfg(feature = "__test-hooks")]
+            let mut aborted = aborted;
             let result = tokio::time::timeout(REQUEST_TIMEOUT, fetch_redirect_chain(url, chain))
                 .await
                 .unwrap_or_else(|_| {
@@ -1025,6 +1058,10 @@ impl Proxy {
                         REQUEST_TIMEOUT.as_secs()
                     ))
                 });
+            #[cfg(feature = "__test-hooks")]
+            {
+                aborted.0 = false;
+            }
             let _ = done.send((id, result));
         });
         self.tasks.insert(id, handle);
@@ -1184,6 +1221,9 @@ static RELEASED_LOADS: AtomicU64 = AtomicU64::new(0);
 fn cancel_load(load: WebResourceLoad) {
     let url = load.request.url.clone().into_url();
     load.intercept(WebResourceResponse::new(url)).cancel();
+    // Counted after the cancel, so a test sees cancels that happened.
+    #[cfg(feature = "__test-hooks")]
+    TEST_LOAD_CANCELS.fetch_add(1, Ordering::SeqCst);
 }
 
 /// The `Location` of a response that redirects. Only 301, 302, 303, 307 and 308
@@ -1302,6 +1342,8 @@ fn render_one(
     let mut stable = 0;
     let mut last_text: Option<String> = None;
     let mut settled;
+    #[cfg(feature = "__test-hooks")]
+    let mut forced_failure = false;
 
     loop {
         // Servo's callbacks run inside spin_event_loop, so no RefCell borrow is
@@ -1316,6 +1358,16 @@ fn render_one(
         proxy.serve_cookies(servo);
         proxy.deliver_checks();
         proxy.deliver_finished(servo);
+
+        #[cfg(feature = "__test-hooks")]
+        if !proxy.in_flight.is_empty()
+            && !proxy.tasks.is_empty()
+            && TEST_FAIL_WITH_PENDING.swap(false, Ordering::SeqCst)
+        {
+            forced_failure = true;
+            settled = false;
+            break;
+        }
 
         let status = webview.load_status();
         if status == LoadStatus::Complete {
@@ -1355,6 +1407,7 @@ fn render_one(
                     if let Ok(JSValue::Object(fields)) = result {
                         snap.title = string_field(&fields, "title");
                         snap.text = string_field(&fields, "text");
+                        snap.error_page = string_field(&fields, "error_page") == "yes";
                         snap.samples += 1;
                     }
                 });
@@ -1394,58 +1447,139 @@ fn render_one(
         thread::sleep(Duration::from_millis(10));
     }
 
-    let snap = snapshot.borrow();
-    let stalled = snap.pending
-        && last_sample.is_some_and(|sent| Instant::now().duration_since(sent) >= STALL_AFTER);
-    let secs = budget_label(job.timeout);
-    if snap.samples == 0 {
-        drop(snap);
-        cancel_pending(&mut proxy, &delegate);
-        return Err(if stalled {
-            format!("page scripts stopped responding before any text could be read (waited {secs})")
-        } else {
-            format!("page did not finish loading within {secs}")
-        });
-    }
-    let text = normalize_text(&sanitize_control(&snap.text));
-    let incomplete = if settled {
-        None
-    } else if text.is_empty() {
-        Some(format!(
+    let result = (|| {
+        #[cfg(feature = "__test-hooks")]
+        if forced_failure {
+            return Err("test failure with pending work".to_string());
+        }
+        let snap = snapshot.borrow();
+        // A page that imitates a Servo error template is classified as failed.
+        if snap.error_page {
+            // Servo's error page is showing, so the main document did not load. The
+            // first line of its text is Servo's reason, such as "Could not load the
+            // requested page: client error (Connect)". The rest of the page (a TLS
+            // error page also carries the certificate) is left out.
+            let text = normalize_text(&sanitize_control(&snap.text));
+            let reason: String = text
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(300)
+                .collect();
+            return Err(if reason.is_empty() {
+                "the page could not be loaded".to_string()
+            } else {
+                reason
+            });
+        }
+        let stalled = snap.pending
+            && last_sample.is_some_and(|sent| Instant::now().duration_since(sent) >= STALL_AFTER);
+        let secs = budget_label(job.timeout);
+        if snap.samples == 0 {
+            return Err(if stalled {
+                format!(
+                    "page scripts stopped responding before any text could be read (waited {secs})"
+                )
+            } else {
+                format!("page did not finish loading within {secs}")
+            });
+        }
+        let text = normalize_text(&sanitize_control(&snap.text));
+        let incomplete = if settled {
+            None
+        } else if text.is_empty() {
+            Some(format!(
             "the page showed no readable text after {secs}. The site may be blocking \
              automated browsers, or the page may need a login. Fetching it again is unlikely to help."
         ))
-    } else if stalled {
-        Some(
-            "the page's scripts stopped responding, probably waiting on a request that never \
+        } else if stalled {
+            Some(
+                "the page's scripts stopped responding, probably waiting on a request that never \
              finished. This text was captured before that and may be missing content."
-                .to_string(),
-        )
-    } else if loaded_at.is_none() {
-        Some(format!(
-            "the page was still loading after {secs}. Some content may be missing."
-        ))
-    } else if !proxy.in_flight.is_empty() {
-        Some(format!(
+                    .to_string(),
+            )
+        } else if loaded_at.is_none() {
+            Some(format!(
+                "the page was still loading after {secs}. Some content may be missing."
+            ))
+        } else if !proxy.in_flight.is_empty() {
+            Some(format!(
             "the page was still waiting on {} of its own requests after {secs}. Some content may be missing.",
             proxy.in_flight.len()
         ))
-    } else {
-        Some(format!(
-            "the page was still changing after {secs}. Some content may be missing."
-        ))
-    };
-    let title = sanitize_control(&snap.title)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    drop(snap);
+        } else {
+            Some(format!(
+                "the page was still changing after {secs}. Some content may be missing."
+            ))
+        };
+        let title = sanitize_control(&snap.title)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        Ok(RenderedPage {
+            title,
+            text,
+            incomplete,
+        })
+    })();
     cancel_pending(&mut proxy, &delegate);
-    Ok(RenderedPage {
-        title,
-        text,
-        incomplete,
-    })
+    assert!(
+        delegate.held.borrow().is_empty()
+            && proxy.checking.is_empty()
+            && proxy.in_flight.is_empty()
+            && proxy.tasks.is_empty(),
+        "render cleanup left pending loads or tasks"
+    );
+    result
+}
+
+#[cfg(feature = "__test-hooks")]
+static TEST_FAIL_WITH_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "__test-hooks")]
+static TEST_LOAD_CANCELS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "__test-hooks")]
+static TEST_TASK_ABORTS: AtomicU64 = AtomicU64::new(0);
+
+/// Counts a proxy task dropped before it finished, that is, aborted.
+#[cfg(feature = "__test-hooks")]
+struct TaskAbortProbe(bool);
+
+#[cfg(feature = "__test-hooks")]
+impl Drop for TaskAbortProbe {
+    fn drop(&mut self) {
+        if self.0 {
+            TEST_TASK_ABORTS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Arm a failure once a proxied load and its task are both pending.
+#[cfg(feature = "__test-hooks")]
+#[doc(hidden)]
+pub fn test_fail_with_pending() {
+    TEST_FAIL_WITH_PENDING.store(true, Ordering::SeqCst);
+}
+
+/// Counts of load cancellations and of proxy tasks dropped unfinished (aborted).
+#[cfg(feature = "__test-hooks")]
+#[doc(hidden)]
+pub fn test_pending_cleanup_counts() -> (u64, u64) {
+    (
+        TEST_LOAD_CANCELS.load(Ordering::SeqCst),
+        TEST_TASK_ABORTS.load(Ordering::SeqCst),
+    )
+}
+
+#[cfg(feature = "__test-hooks")]
+static CLEANUP_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Count completed per-render cleanups for regression tests.
+#[cfg(feature = "__test-hooks")]
+#[doc(hidden)]
+pub fn test_cleanup_count() -> u64 {
+    CLEANUP_COUNT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Cancel every load that is still waiting, in the proxy and in the delegate,
@@ -1456,6 +1590,8 @@ fn cancel_pending(proxy: &mut Proxy, delegate: &PageDelegate) {
     for load in held {
         cancel_load(load);
     }
+    #[cfg(feature = "__test-hooks")]
+    CLEANUP_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Collapse whitespace within each line and drop empty lines.

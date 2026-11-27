@@ -10,7 +10,7 @@ harness.
 
 ```sh
 cargo binstall cherrypi-fetch   # prebuilt binary, no Servo build
-cargo install cherrypi-fetch    # build from source
+cargo install --locked cherrypi-fetch    # build from source, with the locked dependency versions
 ```
 
 `cargo binstall` needs [cargo-binstall](https://github.com/cargo-bins/cargo-binstall)
@@ -69,6 +69,22 @@ last snapshot taken. A failed record has `ok:false`, with `title` and `text`
 (even if others were incomplete) or the arguments were bad; 2 when at least
 one was incomplete and none failed.
 
+## MCP server
+
+Run `cherrypi-fetch mcp` as a stdio MCP server. Its `fetch_page` tool renders
+HTTP and HTTPS pages and returns their title and visible text. Private and
+loopback addresses are blocked by default; for local testing, start the server
+with `cherrypi-fetch mcp --allow-private`.
+
+The `max_chars` and `timeout_secs` arguments must be JSON numbers representable
+as finite doubles. Fractional parts below double precision are rounded.
+
+To smoke-test the tool list with MCP Inspector:
+
+```sh
+npx @modelcontextprotocol/inspector --cli cherrypi-fetch mcp --method tools/list
+```
+
 ## Library
 
 ```rust
@@ -76,6 +92,7 @@ one was incomplete and none failed.
 async fn demo() -> Result<(), cherrypi_fetch::RenderError> {
     cherrypi_fetch::configure(cherrypi_fetch::RendererConfig {
         user_agent: "MyTool/1.0".into(),
+        ..Default::default()
     })?; // optional; call before the first render
     let url = url::Url::parse("https://example.com/").unwrap();
     let result = cherrypi_fetch::render_page(url, cherrypi_fetch::RENDER_TIMEOUT).await;
@@ -227,3 +244,5 @@ The non-default `__test-hooks` feature turns the private-address check off for
 the host and port pairs a test names. This crate's own tests enable it through
 a dev-dependency, so it is not on for downstream users. Do not enable it in a
 published build.
+
+Servo load failures are detected by matching the top-level DOM against Servo’s error-page templates. A page that imitates one is reported as a failed load.
