@@ -2,7 +2,7 @@
 # Check that every distributed manifest carries the crate's version.
 #
 # A pre-release branch can have manifests ahead of Cargo.toml: for example
-# Cargo 0.1.1 with 0.2.0 manifests that wait for the release. The manifests
+# Cargo 0.2.0 with 0.3.0 manifests that wait for the release. The manifests
 # must always agree with each other. Once Cargo.toml reaches a manifest
 # version, every manifest must equal it, and it may never be behind.
 #

@@ -85,6 +85,22 @@ To smoke-test the tool list with MCP Inspector:
 npx @modelcontextprotocol/inspector --cli cherrypi-fetch mcp --method tools/list
 ```
 
+## Use it from your agent
+
+Each plugin bundles the `fetch_page` tool and a skill that tells the agent when
+to use it. Install the binary first (above). Claude Code and Codex need 0.2.0
+or newer, because their plugins start `cherrypi-fetch mcp`.
+
+| Agent | Install |
+|---|---|
+| Claude Code | `/plugin marketplace add kerryhatcher/CherryPi-Fetch`, then `/plugin install cherrypi-fetch@cherrypi-fetch` |
+| Codex | `codex plugin marketplace add kerryhatcher/CherryPi-Fetch`, then `codex plugin add cherrypi-fetch@cherrypi-fetch` |
+| Pi | `pi install git:github.com/kerryhatcher/CherryPi-Fetch` |
+| Any MCP client | Run `cherrypi-fetch mcp` as a stdio server, for example `pi mcp add cherrypi-fetch -- cherrypi-fetch mcp` |
+
+[`plugins/README.md`](plugins/README.md) has local-checkout installs,
+validation commands and the format versions checked.
+
 ## Library
 
 ```rust
