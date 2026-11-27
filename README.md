@@ -147,17 +147,21 @@ captured no text, it fails (`ok:false`, exit 1).
   page script (XHR or fetch) is fetched by this crate, so a synchronous XHR to
   a server that never answers gets a timeout. It is sent the page's cookies,
   follows only same-origin redirects (301, 302, 303, 307 and 308 with a
-  `Location`), and is limited to 10 redirects. A same-origin script request
-  (XHR or fetch) whose redirect leaves its origin fails with a network error,
-  unlike a browser, because the proxy keeps the 8-second synchronous XHR
-  deadline; see [issue #19](https://github.com/kerryhatcher/CherryPi-Fetch/issues/19).
-  A cross-origin script fetch that redirects is left to Servo, which applies
-  CORS. Pages that send
-  `Referrer-Policy: no-referrer` get no such timeout: their script requests are
-  not recognised as same-origin, so they are left to Servo.
-- **Inspected credentials are refused.** The embedder refuses inspected request
-  URLs containing `user:pass@`. On redirect hops the interceptor sees the original
-  URL, so this check does not cover redirect targets.
+  `Location`), and is limited to 10 redirects. A proxied same-origin script
+  GET whose redirect leaves its origin fails with a network error, unlike a
+  browser, because the proxy keeps the 8-second synchronous XHR deadline; see
+  [issue #19](https://github.com/kerryhatcher/CherryPi-Fetch/issues/19). A
+  script fetch that starts out cross-origin and redirects is left to Servo,
+  which applies CORS. Pages that send `Referrer-Policy: no-referrer` get no
+  such timeout: their script requests are not recognised as same-origin, so
+  they are left to Servo.
+- **URL userinfo (`user:pass@`) is handled by entry point.** The CLI and
+  `render_page` strip it from the input URL before Servo sees it. A load
+  whose URL still carries it (for example a subresource the page names) is
+  refused. The proxied script-GET chain strips it from each redirect target.
+  For redirects Servo follows itself, the interceptor sees only the original
+  URL, so this check does not cover their targets. A top-level redirect to a
+  URL with userinfo can fail to finish within the render budget.
 - **The WebSocket connection is the one place DNS rebinding remains.** Servo
   connects a WebSocket itself, without the proxy. The handshake is checked
   before it is sent, but the connection is resolved again, so a server that
@@ -193,10 +197,8 @@ that lists every dependency and its license text.
 project that owns the `servo-fetch` name on crates.io. It is a much larger
 tool: it renders to Markdown, JSON or PNG screenshots, crawls sites, maps
 URLs from sitemaps, and ships a Rust library, Python and Node.js SDKs, an MCP
-server and a Docker image. Its README also describes safety work this project
-does not do: it blocks private and reserved IP ranges and strips credentials
-from URLs. The `cherrypi-fetch` CLI refuses URLs that are not http or https;
-the library does not check the scheme.
+server and a Docker image. Both projects block private and reserved
+addresses by default and strip credentials from input URLs.
 
 `cherrypi-fetch` is deliberately smaller and focused on one job: return a
 page's title and visible text to a caller that may be an agent. Its behaviour

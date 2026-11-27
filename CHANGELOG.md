@@ -26,8 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Redirect statuses: only 301, 302, 303, 307 and 308 with a `Location` are
   redirects. Other responses, such as a 300 or a 304, reach the page as they
   are.
-- Requests with `user:pass@` in their URL are refused before Servo fetches
-  them.
+- A load whose URL carries `user:pass@` is refused before Servo fetches it.
+  Redirect targets that Servo follows itself are not covered; see the README.
 - The non-default `test-hooks` feature is now `__test-hooks`.
 
 ### Added
@@ -36,11 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the page and every resource it loads, when they connect. Only `http` and
   `https` are fetched (`data`, `blob` and `about` are allowed locally; other
   schemes, including `file:`, are refused). Ports on the Fetch standard's
-  bad-port list are refused. `user:pass@` is stripped from URLs.
+  bad-port list are refused. `user:pass@` is stripped from the input URL.
   `--allow-private` and `RendererConfig::allow_private_networks` opt out for
   local testing.
 - `strip_userinfo` is public, so a caller can strip credentials the same way
   the CLI does.
+
 ## [0.1.1] - 2026-11-26
 
 ### Fixed
