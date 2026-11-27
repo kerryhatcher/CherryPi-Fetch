@@ -46,16 +46,17 @@ async fn cookies_are_sent_and_stored_on_every_redirect_hop() {
     );
     assert!(page.text.contains("chain ended"), "page: {page:?}");
 
-    // A cookie set by 127.0.0.1 is not sent to a redirect to 127.0.0.2: the
-    // jar answers for the next hop's own URL.
-    let other = serve("127.0.0.2:0", |_| Reply::text("other host"));
+    // A cookie set by 127.0.0.1 is not sent to a redirect to localhost, which is
+    // another host name: the jar answers for the next hop's own URL. (127.0.0.2
+    // is not used: macOS has no such loopback address by default.)
+    let other = serve("127.0.0.1:0", |_| Reply::text("other host"));
     let other_port = other.port;
     let origin = serve("127.0.0.1:0", move |req| match req.route() {
-        "/s" => Reply::redirect(&format!("http://127.0.0.2:{other_port}/f"))
+        "/s" => Reply::redirect(&format!("http://localhost:{other_port}/f"))
             .with_header("Set-Cookie", "sid=abc123; Path=/"),
         _ => Reply::not_found(),
     });
-    mark_public(&[("127.0.0.1", origin.port), ("127.0.0.2", other_port)]);
+    mark_public(&[("127.0.0.1", origin.port), ("localhost", other_port)]);
     let page = render(&format!("http://127.0.0.1:{}/s", origin.port))
         .await
         .expect("the cross-host redirect should render");
@@ -64,7 +65,7 @@ async fn cookies_are_sent_and_stored_on_every_redirect_hop() {
     assert_eq!(
         f[0].header("cookie"),
         None,
-        "a cookie set by 127.0.0.1 was sent to 127.0.0.2"
+        "a cookie set by 127.0.0.1 was sent to localhost"
     );
     assert!(page.text.contains("other host"), "page: {page:?}");
     cherrypi_fetch::shutdown_renderer();

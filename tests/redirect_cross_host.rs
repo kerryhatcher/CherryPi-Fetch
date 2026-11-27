@@ -5,9 +5,9 @@
 //!
 //! Both cases run in one test: the renderer starts once per process.
 //!
-//! Run with `cargo test --test redirect_cross_host`. It binds 127.0.0.2, which
-//! only Linux routes to loopback by default, so it is compiled on Linux only.
-#![cfg(target_os = "linux")]
+//! Run with `cargo test --test redirect_cross_host`. The second host is named
+//! `localhost` and the unmarked one is `[::1]`, so no test needs 127.0.0.2, which
+//! macOS does not route to loopback by default.
 
 mod common;
 
@@ -18,16 +18,16 @@ async fn redirects_between_hosts_follow_the_address_check_on_each_hop() {
     setup();
 
     // Case 1: public origin -> another public host renders the target.
-    let target = serve("127.0.0.2:0", |req| match req.route() {
+    let target = serve("127.0.0.1:0", |req| match req.route() {
         "/target" => Reply::html("<html><body>CROSS-HOST-TARGET</body></html>"),
         _ => Reply::not_found(),
     });
     let target_port = target.port;
     let origin = serve("127.0.0.1:0", move |req| match req.route() {
-        "/top" => Reply::redirect(&format!("http://127.0.0.2:{target_port}/target")),
+        "/top" => Reply::redirect(&format!("http://localhost:{target_port}/target")),
         _ => Reply::not_found(),
     });
-    mark_public(&[("127.0.0.1", origin.port), ("127.0.0.2", target_port)]);
+    mark_public(&[("127.0.0.1", origin.port), ("localhost", target_port)]);
     let page = render(&format!("http://127.0.0.1:{}/top", origin.port))
         .await
         .expect("the cross-host redirect should render");
@@ -38,12 +38,12 @@ async fn redirects_between_hosts_follow_the_address_check_on_each_hop() {
 
     // Case 2: a host that is not marked, listening on the same port number as
     // a marked origin, is refused. Only the host and port pair is public.
-    let unmarked = serve("127.0.0.2:0", |_| {
+    let unmarked = serve("[::1]:0", |_| {
         Reply::html("<html><body>UNMARKED-TARGET</body></html>")
     });
     let port = unmarked.port;
     let _origin = serve(&format!("127.0.0.1:{port}"), move |req| match req.route() {
-        "/cross" => Reply::redirect(&format!("http://127.0.0.2:{port}/target")),
+        "/cross" => Reply::redirect(&format!("http://[::1]:{port}/target")),
         _ => Reply::not_found(),
     });
     mark_public(&[("127.0.0.1", port)]);
