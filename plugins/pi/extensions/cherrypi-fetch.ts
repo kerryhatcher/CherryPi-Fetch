@@ -11,7 +11,10 @@ import { Type } from "typebox";
 
 const DEFAULT_TIMEOUT_SECS = 20;
 const MAX_TIMEOUT_SECS = 600;
-const DEFAULT_MAX_CHARS = 20_000;
+// Match the MCP tool: default 40,000 characters, clamp at 200,000.
+const DEFAULT_MAX_CHARS = 40_000;
+const MAX_CHARS_LIMIT = 200_000;
+const MAX_TITLE_CHARS = 500;
 
 /** Extra time for the CLI to print its record after its own render timeout. */
 const EXIT_GRACE_MS = 10_000;
@@ -48,13 +51,36 @@ const parameters = Type.Object({
   ),
   max_chars: Type.Optional(
     Type.Integer({
-      description: "Keep at most this many characters of the page text",
+      description:
+        "Keep at most this many characters of the page text (default 40000; values above 200000 are clamped)",
       minimum: 1,
-      maximum: 1_000_000,
       default: DEFAULT_MAX_CHARS,
     }),
   ),
 });
+
+/** Reject anything the CLI would also reject, before spawning it. */
+function checkUrl(raw: string): void {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`Not a valid URL: ${raw}`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(
+      `Unsupported URL scheme ${url.protocol.replace(/:$/, "")}: use http or https.`,
+    );
+  }
+}
+
+function truncateChars(value: string, max: number): { text: string; truncated: boolean } {
+  const chars = Array.from(value);
+  if (chars.length <= max) {
+    return { text: value, truncated: false };
+  }
+  return { text: chars.slice(0, max).join(""), truncated: true };
+}
 
 function parseRecord(stdout: string): FetchRecord | undefined {
   const line = stdout
@@ -77,8 +103,12 @@ function isMissingBinary(stderr: string): boolean {
 }
 
 function formatRecord(record: FetchRecord, maxChars: number): string {
-  const lines = [`URL: ${record.url}`, `Title: ${record.title ?? "(none)"}`];
+  const title = truncateChars(record.title ?? "(none)", MAX_TITLE_CHARS);
+  const lines = [`URL: ${record.url}`, `Title: ${title.text}`];
 
+  if (title.truncated) {
+    lines.push(`Note: title truncated at ${MAX_TITLE_CHARS} characters.`);
+  }
   if (record.error) {
     lines.push(`Error: ${record.error}`);
   }
@@ -112,14 +142,19 @@ export default function cherrypiFetchExtension(pi: ExtensionAPI) {
     parameters,
 
     async execute(_toolCallId, params, signal) {
+      checkUrl(params.url);
+
       const timeoutSecs = params.timeout_secs ?? DEFAULT_TIMEOUT_SECS;
-      const maxChars = params.max_chars ?? DEFAULT_MAX_CHARS;
+      const requestedMaxChars = params.max_chars ?? DEFAULT_MAX_CHARS;
+      const maxChars = Math.min(Math.max(requestedMaxChars, 1), MAX_CHARS_LIMIT);
       const args = [
         "--json",
         "--timeout",
         String(timeoutSecs),
         "--max-chars",
         String(maxChars),
+        // Keep a URL that starts with a dash from becoming a CLI option.
+        "--",
         params.url,
       ];
 
@@ -128,9 +163,18 @@ export default function cherrypiFetchExtension(pi: ExtensionAPI) {
         // Let the CLI hit its own render timeout and still print an
         // `incomplete` record before Pi kills it.
         timeout: timeoutSecs * 1000 + EXIT_GRACE_MS,
-        // JSON escaping can make the output larger than maxChars.
+        // JSON escaping can make the output larger than maxChars; a long
+        // title still counts against this cap.
         maxBuffer: Math.max(maxChars * 8 + 65_536, 1_048_576),
       });
+
+      // `killed` is also true when maxBuffer is exceeded, so check this before
+      // reporting a timeout.
+      if (result.truncated) {
+        throw new Error(
+          "cherrypi-fetch returned more output than Pi can buffer, so the record was cut off. Lower max_chars or run cherrypi-fetch directly.",
+        );
+      }
 
       const record = parseRecord(result.stdout);
 

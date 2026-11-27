@@ -138,6 +138,8 @@ jobs:
             exit 1
           fi
           echo "Skills are in sync."
+      - name: Check plugin versions match Cargo.toml
+        run: bash scripts/check-plugin-versions.sh
       - name: Validate JSON
         run: |
           set -euo pipefail

@@ -79,12 +79,21 @@ pi mcp add cherrypi-fetch -- cherrypi-fetch mcp
 
 ## Shared requirements
 
-- `cherrypi-fetch` 0.2.0 or newer on `PATH`. The `mcp` subcommand arrives in
-  0.2.0; the Pi extension only needs the CLI's `--json` output.
-- Claude Code and Codex launch the MCP server themselves; the Pi extension
-  starts the CLI as a child process.
+- **Claude Code and Codex:** `cherrypi-fetch` 0.2.0 or newer on `PATH`, because
+  both plugins launch their MCP server with `cherrypi-fetch mcp`.
+- **Pi:** `cherrypi-fetch` 0.1.x or newer on `PATH`. The extension only needs
+  the CLI's `--json`, `--timeout` and `--max-chars` options, which 0.1.x has.
+  The Pi skill also works when `fetch_page` comes from the MCP server instead.
 
-## Sources checked (2026-11-27)
+## Versions
+
+Every manifest is `0.2.0`, the first release with the `mcp` subcommand.
+`scripts/check-plugin-versions.sh` requires the manifests to agree with each
+other, and to equal `Cargo.toml` once the crate reaches their version. Before
+that (for example on this branch, where Cargo is 0.1.1) the manifests may be
+ahead, but never behind.
+
+## Sources checked (2026-11-26)
 
 - **Claude Code 2.1.332:** `claude plugin --help` and
   `claude plugin validate --help`; both manifests pass

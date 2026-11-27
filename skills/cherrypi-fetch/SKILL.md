@@ -23,36 +23,51 @@ Do not use it to get past a CAPTCHA, a paywall or a login.
 ## How to use it
 
 1. Prefer the `fetch_page` tool when it is available: the MCP server and the
-   Pi package both expose it. It takes `url` and optional `timeout_secs` and
-   `max_chars`, and returns the same record as the CLI's `--json` output.
+   Pi package both expose it. It takes `url`, optional `timeout_secs` (1–600,
+   default 20) and optional `max_chars` (default 40000; larger values are
+   clamped to 200000).
+
+   - **MCP:** the result is a text block plus `structuredContent` with `url`,
+     `title`, `text`, `incomplete`, `truncated` and `elapsed_ms`. There is no
+     `ok` or `error` field. A bad argument or a page that cannot be rendered is
+     an `isError` result whose text is the reason.
+   - **Pi:** the model-facing text is formatted, and the tool's `details` field
+     is the CLI record described below, including `ok` and `error`.
+
 2. Otherwise run the CLI and read the exit code:
 
 ```sh
-cherrypi-fetch --json --max-chars 20000 https://example.com/
+cherrypi-fetch --json --max-chars 40000 -- https://example.com/
 ```
 
-The CLI writes one JSON object per URL to stdout and diagnostics to stderr.
-The record has `url`, `ok`, `title`, `text`, `incomplete`, `truncated`,
-`error` and `elapsed_ms`.
+Put `--` before the URL so the URL cannot be read as an option.
+
+A render failure or an unsupported URL scheme prints one JSON record per URL
+to stdout and diagnostics to stderr. The record has `url`, `ok`, `title`,
+`text`, `incomplete`, `truncated`, `error` and `elapsed_ms`. An argument error
+prints nothing to stdout; the reason is on stderr.
 
 Exit status:
 
 - `0`: every page rendered fully.
 - `2`: at least one page did not settle and none failed. The record still has
   text, plus an `incomplete` reason.
-- `1`: at least one page failed, or the arguments were bad. The record has
-  `ok:false` and the reason in `error`.
+- `1`: at least one page failed, or the arguments were bad. A failed render or
+  a rejected URL scheme still prints an `ok:false` record with `error`. An
+  argument error prints no record; read stderr.
 
 ## How to read the result
 
-- If `incomplete` is set, the page did not settle in time. Report that and the
-  last text captured. Do not re-fetch in a loop; a second run usually gives the
-  same result.
-- If `ok` is false, report `error` to the user.
+- **MCP:** if the tool result is an error, report its text. Otherwise check
+  `structuredContent`. If `incomplete` is set, the page did not settle; report
+  that and the last text captured. Do not re-fetch in a loop.
+- **CLI or Pi details:** if `ok` is false, report `error`. If `incomplete` is
+  set, the page did not settle; report that and the last text captured. Do not
+  re-fetch in a loop.
 - If the text is blank, assume a bot block or a login wall. Say so. Do not
   hunt for mirrors or alternate sources unless the user asked for one.
-- If `truncated` is true, the text was cut at `--max-chars`. Raise the limit
-  only when the missing tail matters.
+- If `truncated` is true, the text was cut at `max_chars`. Raise the limit only
+  when the missing tail matters.
 
 ## Install
 

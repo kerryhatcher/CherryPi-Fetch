@@ -43,6 +43,9 @@ for target in "${targets[@]}"; do
       echo "error: $skill/SKILL.md is missing" >&2
       exit 1
     fi
+    # Remove the whole destination skill directory so a file that is no
+    # longer in the source cannot survive a sync.
+    rm -rf "$destination/$name"
     mkdir -p "$destination/$name"
     cp "$skill/SKILL.md" "$destination/$name/SKILL.md"
   done

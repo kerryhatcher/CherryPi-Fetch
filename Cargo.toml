@@ -11,14 +11,16 @@ description = "Render JavaScript-heavy web pages in Servo and return their visib
 keywords = ["servo", "scraping", "headless", "spa", "mcp"]
 categories = ["command-line-utilities", "web-programming"]
 rust-version = "1.88.0"
+# Anchor every pattern with a leading slash. Cargo include patterns match at
+# any depth otherwise, so "README.md" would also ship plugins/README.md.
 include = [
-    "src/**",
-    "tests/**",
-    "Cargo.toml",
-    "Cargo.lock",
-    "LICENSE",
-    "README.md",
-    "CHANGELOG.md",
+    "/src/**",
+    "/tests/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/LICENSE",
+    "/README.md",
+    "/CHANGELOG.md",
 ]
 
 [features]
