@@ -22,9 +22,11 @@ include = [
 ]
 
 [features]
-default = ["cli"]
+default = ["cli", "mcp"]
 # The `cherrypi-fetch` command-line tool. Library users can turn it off.
 cli = ["dep:clap", "dep:serde", "dep:serde_json", "dep:tracing-subscriber"]
+# `cherrypi-fetch mcp`, a stdio MCP server. It is part of the binary, not the library.
+mcp = ["cli", "dep:rmcp", "dep:schemars"]
 
 [[bin]]
 name = "cherrypi-fetch"
@@ -46,6 +48,9 @@ clap = { version = "4", features = ["derive"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
+# Pinned exactly: the MCP wire behaviour in src/mcp.rs is tested against this version.
+rmcp = { version = "=3.12.0", default-features = false, features = ["server", "transport-io"], optional = true }
+schemars = { version = "1", optional = true }
 
 # Let `cargo binstall` fetch the prebuilt archive from the GitHub release
 # instead of building Servo. The archive root holds the binary, LICENSE, README

@@ -11,19 +11,31 @@ use cherrypi_fetch::{
     RenderedPage, RendererConfig, DEFAULT_USER_AGENT, MAX_TIMEOUT, RENDER_TIMEOUT,
 };
 use clap::Parser;
+#[cfg(feature = "mcp")]
+use clap::Subcommand;
 use serde::Serialize;
+
+#[cfg(feature = "mcp")]
+mod mcp;
 
 #[derive(Parser)]
 #[command(
     name = "cherrypi-fetch",
     version,
     about = "Render web pages in Servo and print their visible text",
-    after_help = "Exit status: 0 all pages complete, 2 some page incomplete, 1 some page failed."
+    after_help = "Exit status: 0 all pages complete, 2 some page incomplete, 1 some page failed.",
+    // Options and URLs belong to the default mode; a subcommand takes none of them.
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true
 )]
 struct Args {
     /// http(s) URLs to render, one after another
     #[arg(required = true)]
     urls: Vec<String>,
+
+    #[cfg(feature = "mcp")]
+    #[command(subcommand)]
+    command: Option<Command>,
 
     /// Seconds allowed for each page to load and settle
     #[arg(
@@ -44,6 +56,13 @@ struct Args {
     /// Keep at most this many characters of each page's text
     #[arg(long)]
     max_chars: Option<usize>,
+}
+
+#[cfg(feature = "mcp")]
+#[derive(Subcommand)]
+enum Command {
+    /// Serve `fetch_page` to MCP clients over stdio (stdout carries only JSON-RPC)
+    Mcp,
 }
 
 /// One URL's result, as printed with `--json`.
@@ -94,6 +113,12 @@ async fn main() -> ExitCode {
         }
     };
     init_logging();
+
+    #[cfg(feature = "mcp")]
+    if matches!(args.command, Some(Command::Mcp)) {
+        return mcp::serve_stdio().await;
+    }
+
     let _shutdown = Shutdown;
 
     if let Err(e) = cherrypi_fetch::configure(RendererConfig {
@@ -239,6 +264,22 @@ mod tests {
             .unwrap_err()
             .contains("scheme"));
         assert!(parse_url("not a url").unwrap_err().contains("invalid URL"));
+    }
+
+    #[test]
+    fn parses_urls_and_the_mcp_subcommand() {
+        assert!(Args::try_parse_from(["cherrypi-fetch", "https://example.com/"]).is_ok());
+        assert!(Args::try_parse_from(["cherrypi-fetch"]).is_err());
+        assert!(Args::try_parse_from(["cherrypi-fetch", "--json", "https://a.test/"]).is_ok());
+        #[cfg(feature = "mcp")]
+        {
+            let args = Args::try_parse_from(["cherrypi-fetch", "mcp"]).unwrap();
+            assert!(matches!(args.command, Some(Command::Mcp)));
+            assert!(args.urls.is_empty());
+            // `mcp` takes no URLs. (Options such as --json are accepted with
+            // `mcp` and ignored; `url mcp` reads "mcp" as a URL.)
+            assert!(Args::try_parse_from(["cherrypi-fetch", "mcp", "https://a.test/"]).is_err());
+        }
     }
 
     #[test]
