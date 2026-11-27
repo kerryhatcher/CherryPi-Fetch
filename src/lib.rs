@@ -47,6 +47,10 @@ use servo::{
     WebResourceResponse, WebView, WebViewBuilder, WebViewDelegate,
 };
 
+// Wired into the renderer in the next commit.
+#[cfg_attr(not(test), allow(dead_code))]
+mod guard_proxy;
+
 /// User-Agent sent when [`configure`] is not called. It claims Windows on
 /// purpose: some sites hang requests from desktop Linux user agents.
 pub const DEFAULT_USER_AGENT: &str =
@@ -281,15 +285,42 @@ fn proxy_environment_variable() -> Option<String> {
     })
 }
 
-/// Refuse a URL whose host is not public, and return the addresses it
-/// resolved to. A URL with no host, such as a `data:` URL, resolves to nothing.
-async fn check_destination(url: &url::Url) -> Result<Vec<IpAddr>, String> {
-    check_scheme(url)?;
-    let Some(host) = url.host_str() else {
-        return Ok(Vec::new());
-    };
-    let port = url.port_or_known_default().unwrap_or(0);
+/// Ports that browsers never connect to on the web, from the Fetch standard's
+/// bad-port list. Servo applies the same list to the requests it makes (see
+/// `should_request_be_blocked_due_to_a_bad_port` in servo-net 0.8.0,
+/// `fetch/methods.rs`, which is a copy of this table), but it does not apply it
+/// to the requests this crate makes itself, so the check is repeated here.
+const BAD_PORTS: [u16; 83] = [
+    0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101,
+    102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427,
+    465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990,
+    993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667,
+    6668, 6669, 6679, 6697, 10080,
+];
+
+fn is_bad_port(port: u16) -> bool {
+    BAD_PORTS.binary_search(&port).is_ok()
+}
+
+/// Decide whether `host:port` may be connected to, and return the addresses
+/// the connection may use. This is the one place the address policy lives: the
+/// early checks and the checking proxy both call it. The proxy connects only to
+/// the addresses returned here, so a later DNS answer cannot change the target.
+/// With `allow_private`, only the bad-port refusal applies, as in Servo.
+pub(crate) async fn check_host(
+    host: &str,
+    port: u16,
+    allow_private: bool,
+) -> Result<Vec<IpAddr>, String> {
+    if is_bad_port(port) {
+        return Err(format!(
+            "port {port} is a bad port, which browsers never connect to"
+        ));
+    }
     let ips = resolve_addresses(host, port).await?;
+    if allow_private {
+        return Ok(ips);
+    }
     // A test can mark a host and port as public, so a redirect away from a
     // loopback origin can be exercised without a real public address.
     #[cfg(feature = "test-hooks")]
@@ -303,6 +334,24 @@ async fn check_destination(url: &url::Url) -> Result<Vec<IpAddr>, String> {
         ));
     }
     Ok(ips)
+}
+
+/// Refuse a URL whose host is not public, and return the addresses it
+/// resolved to. A URL with no host, such as a `data:` URL, resolves to nothing.
+async fn check_destination(url: &url::Url) -> Result<Vec<IpAddr>, String> {
+    check_destination_with(url, false).await
+}
+
+async fn check_destination_with(
+    url: &url::Url,
+    allow_private: bool,
+) -> Result<Vec<IpAddr>, String> {
+    check_scheme(url)?;
+    let Some(host) = url.host_str() else {
+        return Ok(Vec::new());
+    };
+    let port = url.port_or_known_default().unwrap_or(0);
+    check_host(host, port, allow_private).await
 }
 
 /// Remove `user:pass@` from a URL, so credentials are never sent to a host.
@@ -319,7 +368,41 @@ pub fn strip_userinfo(mut url: url::Url) -> url::Url {
 /// A test-only DNS override. Tests set the addresses a host resolves to
 /// without touching real DNS.
 #[cfg(test)]
-static TEST_RESOLVER: Mutex<Option<HashMap<String, Vec<IpAddr>>>> = Mutex::new(None);
+static TEST_RESOLVER: Mutex<Option<TestDns>> = Mutex::new(None);
+
+/// Answers per host, in lookup order (the last answer repeats), and how many
+/// lookups each host has had.
+#[cfg(test)]
+#[derive(Default)]
+struct TestDns {
+    answers: HashMap<String, Vec<Vec<IpAddr>>>,
+    lookups: HashMap<String, usize>,
+}
+
+/// Make `host` resolve to each of `answers` in turn. Tests use their own host
+/// names, because the resolver is shared by the tests of one binary.
+#[cfg(test)]
+pub(crate) fn set_test_dns(host: &str, answers: Vec<Vec<IpAddr>>) {
+    let mut guard = TEST_RESOLVER.lock().unwrap();
+    guard
+        .get_or_insert_with(TestDns::default)
+        .answers
+        .insert(host.to_string(), answers);
+}
+
+/// How many times `host` has been looked up through the test resolver.
+#[cfg(test)]
+pub(crate) fn test_lookup_count(host: &str) -> usize {
+    TEST_RESOLVER
+        .lock()
+        .ok()
+        .and_then(|guard| {
+            guard
+                .as_ref()
+                .and_then(|dns| dns.lookups.get(host).copied())
+        })
+        .unwrap_or(0)
+}
 
 /// Host and port pairs an integration test has marked as public. See
 /// [`set_test_public_origins`].
@@ -353,10 +436,13 @@ fn test_public_origin(host: &str, port: u16) -> bool {
 
 #[cfg(test)]
 fn test_resolver_lookup(host: &str) -> Option<Vec<IpAddr>> {
-    TEST_RESOLVER
-        .lock()
-        .ok()
-        .and_then(|map| map.as_ref().and_then(|m| m.get(host).cloned()))
+    let mut guard = TEST_RESOLVER.lock().ok()?;
+    let dns = guard.as_mut()?;
+    let lookup = dns.lookups.entry(host.to_string()).or_insert(0);
+    let index = *lookup;
+    *lookup += 1;
+    let answers = dns.answers.get(host)?;
+    answers.get(index).or(answers.last()).cloned()
 }
 
 /// Time allowed for one page to load and settle.
@@ -1753,14 +1839,24 @@ mod tests {
 
     #[tokio::test]
     async fn blocks_a_host_that_resolves_to_a_private_address() {
-        *TEST_RESOLVER.lock().unwrap() = Some(HashMap::from([(
-            "evil.test".to_string(),
-            vec!["127.0.0.1".parse().unwrap()],
-        )]));
+        set_test_dns("evil.test", vec![vec!["127.0.0.1".parse().unwrap()]]);
         let url = url::Url::parse("http://evil.test/").unwrap();
         let result = check_destination(&url).await;
-        *TEST_RESOLVER.lock().unwrap() = None;
         assert!(result.is_err(), "a host on 127.0.0.1 must be refused");
+    }
+
+    #[test]
+    fn bad_ports_are_the_fetch_standards_list() {
+        assert!(is_bad_port(25));
+        assert!(is_bad_port(6000));
+        assert!(is_bad_port(0));
+        assert!(!is_bad_port(80));
+        assert!(!is_bad_port(443));
+        assert!(!is_bad_port(8080));
+        assert!(
+            BAD_PORTS.windows(2).all(|w| w[0] < w[1]),
+            "binary search needs a sorted table"
+        );
     }
 
     #[test]
