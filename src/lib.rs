@@ -1052,6 +1052,8 @@ impl Proxy {
             cancel_load(load);
         }
         for (_, handle) in self.tasks.drain() {
+            #[cfg(feature = "__test-hooks")]
+            TEST_TASK_ABORTS.fetch_add(1, Ordering::SeqCst);
             handle.abort();
         }
     }
@@ -1194,6 +1196,8 @@ static RELEASED_LOADS: AtomicU64 = AtomicU64::new(0);
 /// Cancel a load that was not allowed to proceed. Dropping one instead would
 /// let Servo fetch it without a check.
 fn cancel_load(load: WebResourceLoad) {
+    #[cfg(feature = "__test-hooks")]
+    TEST_LOAD_CANCELS.fetch_add(1, Ordering::SeqCst);
     let url = load.request.url.clone().into_url();
     load.intercept(WebResourceResponse::new(url)).cancel();
 }
@@ -1314,6 +1318,8 @@ fn render_one(
     let mut stable = 0;
     let mut last_text: Option<String> = None;
     let mut settled;
+    #[cfg(feature = "__test-hooks")]
+    let mut forced_failure = false;
 
     loop {
         // Servo's callbacks run inside spin_event_loop, so no RefCell borrow is
@@ -1328,6 +1334,16 @@ fn render_one(
         proxy.serve_cookies(servo);
         proxy.deliver_checks();
         proxy.deliver_finished(servo);
+
+        #[cfg(feature = "__test-hooks")]
+        if !proxy.in_flight.is_empty()
+            && !proxy.tasks.is_empty()
+            && TEST_FAIL_WITH_PENDING.swap(false, Ordering::SeqCst)
+        {
+            forced_failure = true;
+            settled = false;
+            break;
+        }
 
         let status = webview.load_status();
         if status == LoadStatus::Complete {
@@ -1408,6 +1424,10 @@ fn render_one(
     }
 
     let result = (|| {
+        #[cfg(feature = "__test-hooks")]
+        if forced_failure {
+            return Err("test failure with pending work".to_string());
+        }
         let snap = snapshot.borrow();
         // A page that imitates a Servo error template is classified as failed.
         if snap.error_page {
@@ -1488,6 +1508,31 @@ fn render_one(
         "render cleanup left pending loads or tasks"
     );
     result
+}
+
+#[cfg(feature = "__test-hooks")]
+static TEST_FAIL_WITH_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "__test-hooks")]
+static TEST_LOAD_CANCELS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "__test-hooks")]
+static TEST_TASK_ABORTS: AtomicU64 = AtomicU64::new(0);
+
+/// Arm a failure once a proxied load and its task are both pending.
+#[cfg(feature = "__test-hooks")]
+#[doc(hidden)]
+pub fn test_fail_with_pending() {
+    TEST_FAIL_WITH_PENDING.store(true, Ordering::SeqCst);
+}
+
+/// Counts of explicit load cancellations and task aborts.
+#[cfg(feature = "__test-hooks")]
+#[doc(hidden)]
+pub fn test_pending_cleanup_counts() -> (u64, u64) {
+    (
+        TEST_LOAD_CANCELS.load(Ordering::SeqCst),
+        TEST_TASK_ABORTS.load(Ordering::SeqCst),
+    )
 }
 
 #[cfg(feature = "__test-hooks")]

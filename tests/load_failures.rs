@@ -24,6 +24,14 @@ async fn classifies_main_document_loads() {
                 )
             } else if request.starts_with("GET /origin ") {
                 ("", "<html><body>origin success<script>window.origin = 'null';</script></body></html>".to_string())
+            } else if request.starts_with("GET /pending ") {
+                (
+                    "",
+                    "<html><body>pending<script>fetch('/held');</script></body></html>".to_string(),
+                )
+            } else if request.starts_with("GET /held ") {
+                std::thread::sleep(Duration::from_secs(5));
+                continue;
             } else if request.starts_with("GET /shadow ") {
                 ("", "<html><body>shadow success<script>document.body.querySelector = undefined;</script></body></html>".to_string())
             } else if request.starts_with("GET /prototype ") {
@@ -67,5 +75,20 @@ async fn classifies_main_document_loads() {
             "cleanup missing for {value}"
         );
     }
+    let before = cherrypi_fetch::test_pending_cleanup_counts();
+    cherrypi_fetch::test_fail_with_pending();
+    let error = render_page(
+        format!("http://{addr}/pending").parse().unwrap(),
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("test failure with pending work"),
+        "{error}"
+    );
+    let after = cherrypi_fetch::test_pending_cleanup_counts();
+    assert!(after.0 > before.0, "pending load was not cancelled");
+    assert!(after.1 > before.1, "pending task was not aborted");
     shutdown_renderer();
 }
