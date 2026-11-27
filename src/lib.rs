@@ -49,7 +49,6 @@ use servo::{
 };
 
 mod guard_proxy;
-mod servo_resources;
 
 /// User-Agent sent when [`configure`] is not called. It claims Windows on
 /// purpose: some sites hang requests from desktop Linux user agents.
@@ -1292,7 +1291,6 @@ fn render_one(
     context: &Rc<SoftwareRenderingContext>,
     job: &Job,
 ) -> Result<RenderedPage, String> {
-    servo_resources::ERROR_TEMPLATE_READ.store(false, std::sync::atomic::Ordering::SeqCst);
     reset_site_state(servo);
     let rendering: Rc<dyn RenderingContext> = context.clone();
     let delegate = Rc::new(PageDelegate::default());
@@ -1405,11 +1403,8 @@ fn render_one(
 
     let result = (|| {
         let snap = snapshot.borrow();
-        // A page can imitate the template after an iframe fails; in that case it
-        // is classified as failed. The flag alone cannot distinguish failed frames.
-        if snap.error_page
-            && servo_resources::ERROR_TEMPLATE_READ.load(std::sync::atomic::Ordering::SeqCst)
-        {
+        // A page that imitates a Servo error template is classified as failed.
+        if snap.error_page {
             // Servo's error page is showing, so the main document did not load. The
             // first line of its text is Servo's reason, such as "Could not load the
             // requested page: client error (Connect)". The rest of the page (a TLS
