@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-27
+
 ### Breaking
 
 - `RendererConfig` gained an `allow_private_networks` field, so a struct
@@ -18,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Agent plugins for Claude Code and Codex (an MCP server entry plus a skill),
+  and a Pi package (a `fetch_page` extension plus the skill). They install from
+  this repository's marketplaces; see "Use it from your agent" in the README.
 - Private, loopback and link-local destinations are refused by default, for
   the page and every resource it loads, when they connect (a WebSocket is
   resolved again after its check; see the README). Only `http` and
@@ -114,6 +119,7 @@ Initial release: the `cherrypi-fetch` library and CLI, moved out of CherryPi's
   when at least one failed (even if others were incomplete) or the arguments
   were bad, 2 when at least one was incomplete and none failed.
 
-[Unreleased]: https://github.com/kerryhatcher/CherryPi-Fetch/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/kerryhatcher/CherryPi-Fetch/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/kerryhatcher/CherryPi-Fetch/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/kerryhatcher/CherryPi-Fetch/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kerryhatcher/CherryPi-Fetch/releases/tag/v0.1.0
