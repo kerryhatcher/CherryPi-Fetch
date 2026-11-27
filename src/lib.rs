@@ -32,6 +32,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -903,30 +904,17 @@ impl Proxy {
             cancel_load(load);
             return;
         }
-        if self.allow_private {
-            self.dispatch(load);
+        // A URL with credentials is refused before Servo sees it. Servo's own
+        // fetch of a top-level redirect to such a URL never completes (it
+        // stalls without a network request), and the page must not carry the
+        // credentials to a host that named them in a redirect.
+        if !url.username().is_empty() || url.password().is_some() {
+            tracing::debug!(host = %url.host_str().unwrap_or_default(), "refused a URL with credentials");
+            cancel_load(load);
             return;
         }
-        // A redirect hop Servo would follow: the embedder only sees the
-        // original URL, never the target, so make the request ourselves and
-        // check every hop. A non-GET hop is refused outright.
-        if load.request.is_redirect {
-            let method = load.request.method.as_str();
-            // A cross-origin script fetch (fetch/XHR) would skip Servo's CORS
-            // check on an intercepted hop, so refuse it.
-            let cross_origin = load
-                .request
-                .referrer_url
-                .as_ref()
-                .map(|r| r.as_url().origin() != url.origin())
-                .unwrap_or(true);
-            if (method != "GET" && method != "HEAD")
-                || (load.request.destination == Destination::None && cross_origin)
-            {
-                cancel_load(load);
-            } else {
-                self.start_redirect(load);
-            }
+        if self.allow_private {
+            self.dispatch(load);
             return;
         }
         let id = self.next_id;
@@ -984,13 +972,16 @@ impl Proxy {
     /// drop the load and let Servo make it.
     fn dispatch(&mut self, load: WebResourceLoad) {
         let request = &load.request;
-        if should_proxy(
+        let proxied = should_proxy(
             request.destination,
             request.method.as_str(),
             request.url.as_url(),
             request.referrer_url.as_ref().map(|u| u.as_url()),
-        ) {
+        );
+        if proxied {
             self.start(load);
+        } else {
+            release(load);
         }
     }
 
@@ -1009,43 +1000,9 @@ impl Proxy {
             headers.insert(UA_HEADER, value);
         }
         let chain = Chain {
-            method: reqwest::Method::GET,
             headers,
             cookies: self.cookies.clone(),
-            script_origin: Some(url.origin()),
-            check_addresses: !self.allow_private,
-        };
-        self.spawn_chain(load, url, chain);
-    }
-
-    /// Follow a redirect hop ourselves, checking each hop, and hand the render
-    /// the final response.
-    fn start_redirect(&mut self, load: WebResourceLoad) {
-        let request = &load.request;
-        let url = strip_userinfo(request.url.clone().into_url());
-        let mut headers = request.headers.clone();
-        if let Some(referrer) = request.referrer_url.as_ref().map(|u| u.as_url()) {
-            if let Ok(value) = HeaderValue::from_str(referrer.as_str()) {
-                headers.insert(REFERER, value);
-            }
-        }
-        if let Ok(value) = HeaderValue::from_str(user_agent()) {
-            headers.insert(UA_HEADER, value);
-        }
-        // submit allows only GET and HEAD here.
-        let method = if request.method.as_str() == "HEAD" {
-            reqwest::Method::HEAD
-        } else {
-            reqwest::Method::GET
-        };
-        // A script request's redirect may not leave its origin; submit has
-        // already refused a cross-origin one.
-        let script_origin = (request.destination == Destination::None).then(|| url.origin());
-        let chain = Chain {
-            method,
-            headers,
-            cookies: self.cookies.clone(),
-            script_origin,
+            script_origin: url.origin(),
             check_addresses: !self.allow_private,
         };
         self.spawn_chain(load, url, chain);
@@ -1131,12 +1088,11 @@ impl Proxy {
 
 /// What one proxied request needs to follow its redirects.
 struct Chain {
-    method: reqwest::Method,
     headers: HeaderMap,
     cookies: CookieLink,
-    /// The origin a script request must stay in. Servo's CORS check cannot be
-    /// applied to a hop that leaves it, so such a hop is refused.
-    script_origin: Option<url::Origin>,
+    /// The origin the script request must stay in. A redirect that leaves it is
+    /// refused: Servo's CORS check does not run on a response it did not fetch.
+    script_origin: url::Origin,
     /// Whether each hop's address is checked. Off only with
     /// `allow_private_networks`, for local testing.
     check_addresses: bool,
@@ -1151,10 +1107,8 @@ struct Chain {
 async fn fetch_redirect_chain(url: url::Url, chain: Chain) -> ProxyResult {
     let mut url = url;
     for _ in 0..MAX_REDIRECTS {
-        if let Some(origin) = &chain.script_origin {
-            if url.origin() != *origin {
-                return Err("a script request was redirected to another origin".to_string());
-            }
+        if url.origin() != chain.script_origin {
+            return Err("a script request was redirected to another origin".to_string());
         }
         let addrs = if chain.check_addresses {
             check_destination(&url).await?
@@ -1172,18 +1126,13 @@ async fn fetch_redirect_chain(url: url::Url, chain: Chain) -> ProxyResult {
                 hop_headers.insert(COOKIE, value);
             }
         }
-        let response = fetch(client, url.clone(), chain.method.clone(), hop_headers).await?;
-        if !response.status.is_redirection() {
+        let response = fetch(client, url.clone(), hop_headers).await?;
+        let Some(location) = redirect_location(&response) else {
             return Ok(response);
-        }
+        };
         chain
             .cookies
             .store(&url, set_cookie_values(&response.headers));
-        let location = response
-            .headers
-            .get(reqwest::header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| "a redirect response had no Location".to_string())?;
         // The next iteration checks the target's scheme and origin before
         // anything is requested from it.
         url = strip_userinfo(url.join(location).map_err(|e| e.to_string())?);
@@ -1216,6 +1165,19 @@ fn pinned_client(url: &url::Url, addrs: &[IpAddr]) -> Result<reqwest::Client, St
         .map_err(|e| format!("could not build the proxy client: {e}"))
 }
 
+/// Hand a load back to Servo, which makes the request itself. Dropping a load
+/// does the same thing, so this is the one place a load is allowed through. Every
+/// connection that results goes through the checking proxy, which checks the
+/// destination when it connects. Counted for the debug log.
+fn release(load: WebResourceLoad) {
+    let released = RELEASED_LOADS.fetch_add(1, Ordering::Relaxed) + 1;
+    tracing::trace!(released, "handed a load back to Servo");
+    drop(load);
+}
+
+/// Loads handed back to Servo since the process started.
+static RELEASED_LOADS: AtomicU64 = AtomicU64::new(0);
+
 /// Cancel a load that was not allowed to proceed. Dropping one instead would
 /// let Servo fetch it without a check.
 fn cancel_load(load: WebResourceLoad) {
@@ -1223,23 +1185,26 @@ fn cancel_load(load: WebResourceLoad) {
     load.intercept(WebResourceResponse::new(url)).cancel();
 }
 
-/// Request `url` with `method`, which is GET or HEAD. A HEAD response has no
-/// body, so none is read. The page's own `Accept-Encoding` is dropped: reqwest
+/// The `Location` of a response that redirects. Only 301, 302, 303, 307 and 308
+/// with a `Location` are redirects. Any other response, such as a 300 or a 304,
+/// is the final response.
+fn redirect_location(response: &ProxiedResponse) -> Option<&str> {
+    if !matches!(response.status.as_u16(), 301 | 302 | 303 | 307 | 308) {
+        return None;
+    }
+    response
+        .headers
+        .get(reqwest::header::LOCATION)?
+        .to_str()
+        .ok()
+}
+
+/// Request `url` with GET. The page's own `Accept-Encoding` is dropped: reqwest
 /// advertises the encodings it decodes and the body is delivered decoded.
-async fn fetch(
-    client: reqwest::Client,
-    url: url::Url,
-    method: reqwest::Method,
-    mut headers: HeaderMap,
-) -> ProxyResult {
+async fn fetch(client: reqwest::Client, url: url::Url, mut headers: HeaderMap) -> ProxyResult {
     headers.remove(ACCEPT_ENCODING);
-    let head = method == reqwest::Method::HEAD;
-    let request = if head {
-        client.head(url)
-    } else {
-        client.get(url)
-    };
-    let mut response = request
+    let mut response = client
+        .get(url)
         .headers(headers)
         .send()
         .await
@@ -1248,13 +1213,11 @@ async fn fetch(
     let status = response.status();
     let headers = response.headers().clone();
     let mut body = Vec::new();
-    if !head {
-        while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
-            if body.len() + chunk.len() > MAX_PROXY_BODY {
-                return Err(format!("response body exceeds {MAX_PROXY_BODY} bytes"));
-            }
-            body.extend_from_slice(&chunk);
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        if body.len() + chunk.len() > MAX_PROXY_BODY {
+            return Err(format!("response body exceeds {MAX_PROXY_BODY} bytes"));
         }
+        body.extend_from_slice(&chunk);
     }
     Ok(ProxiedResponse {
         url,

@@ -1,7 +1,8 @@
-//! Credentials in a redirect's `Location` are never sent (F9). The credentials
-//! are on a hop this crate fetches (`/v`), so the `Location` it returns is
-//! joined and stripped by the chain. The target then sees no Authorization
-//! header, and the secret appears in no header it receives.
+//! Credentials in a redirect's `Location` are never sent (F9). The top-level
+//! redirect lands on a URL with user info. That load is refused before Servo
+//! fetches it: Servo's own fetch of such a navigation never completes, and the
+//! credentials must not reach the target in any case. The target sees no
+//! Authorization header, and the secret appears in no header it receives.
 //!
 //! Run with `cargo test --test redirect_userinfo`.
 
@@ -21,9 +22,9 @@ async fn userinfo_in_a_redirect_location_is_not_sent() {
     let port = Arc::new(OnceLock::new());
     let cell = port.clone();
     let origin = serve("127.0.0.1:0", move |req| match req.route() {
-        // Servo follows this hop, so the chain fetches /v itself.
+        // Servo follows this hop itself.
         "/u" => Reply::redirect("/v"),
-        // The chain fetches /v and gets a Location with credentials.
+        // The Location carries credentials, so the load it names is refused.
         "/v" => Reply::redirect(&format!(
             "http://user:{SECRET}@127.0.0.1:{}/target",
             cell.get().copied().unwrap_or(0)
@@ -34,16 +35,10 @@ async fn userinfo_in_a_redirect_location_is_not_sent() {
     let _ = port.set(origin.port);
     mark_public(&[("127.0.0.1", origin.port)]);
 
-    let page = render(&format!("http://127.0.0.1:{}/u", origin.port))
-        .await
-        .expect("the redirect should render");
+    let page = render(&format!("http://127.0.0.1:{}/u", origin.port)).await;
+    std::thread::sleep(std::time::Duration::from_millis(300));
 
-    let target = origin.hits("/target");
-    assert!(
-        !target.is_empty(),
-        "the redirect target was never requested"
-    );
-    for hit in &target {
+    for hit in origin.hits("/target") {
         assert!(
             hit.header("authorization").is_none(),
             "credentials from the Location were sent: {hit:?}"
@@ -53,6 +48,10 @@ async fn userinfo_in_a_redirect_location_is_not_sent() {
             "the password from the Location appears in a request header: {hit:?}"
         );
     }
-    assert!(page.text.contains("USERINFO-TARGET"), "page: {page:?}");
+    let text = page.map(|p| p.text).unwrap_or_default();
+    assert!(
+        !text.contains("USERINFO-TARGET"),
+        "the target's body reached the page: {text:?}"
+    );
     cherrypi_fetch::shutdown_renderer();
 }
