@@ -5,9 +5,8 @@
 //! - `/r` redirects to `localhost`, which resolves to 127.0.0.1 and is not
 //!   marked public: the target must never be requested.
 //! - `/s` redirects to another path on the same public origin: it must work.
-//! - `/x` redirects to another origin: the request is handed to Servo, which
-//!   follows the redirect with CORS. The target has no CORS header, so its body
-//!   must stay unreadable.
+//! - `/x` redirects to another origin: a script request may not leave its
+//!   origin, because Servo's CORS check cannot apply to the hop.
 //!
 //! Run with `cargo test --test integration`.
 
@@ -72,13 +71,16 @@ pub async fn a_script_request_redirect_is_checked_on_every_hop() {
         "a same-origin XHR redirect did not reach its target: {same:?}"
     );
 
-    // Case 3: a script request redirected to another origin is released to
-    // Servo, which applies CORS. The target sends no CORS header, so the body
-    // must not reach the page (it may be requested, by Servo).
+    // Case 3: a script request redirected to another origin is refused.
     let cross = render(&format!("http://127.0.0.1:{}/c", origin.port))
         .await
         .expect("the page should render");
     std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(
+        other.hits("/o").is_empty(),
+        "a script request left its origin through a redirect: {:?}",
+        other.requests()
+    );
     assert!(
         !cross.text.contains("OTHER-ORIGIN"),
         "the other origin's body reached the page: {cross:?}"
