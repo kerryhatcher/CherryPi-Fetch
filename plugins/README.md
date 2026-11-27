@@ -87,11 +87,11 @@ pi mcp add cherrypi-fetch -- cherrypi-fetch mcp
 
 ## Versions
 
-Every manifest is `0.2.0`, the first release with the `mcp` subcommand.
-`scripts/check-plugin-versions.sh` requires the manifests to agree with each
-other, and to equal `Cargo.toml` once the crate reaches their version. Before
-that (for example on this branch, where Cargo is 0.1.1) the manifests may be
-ahead, but never behind.
+Every manifest carries the crate's version; 0.2.0 is the first release with
+the `mcp` subcommand. `scripts/check-plugin-versions.sh` requires the
+manifests to agree with each other, and to equal `Cargo.toml` once the crate
+reaches their version. On a branch that prepares a release, the manifests may
+be ahead of `Cargo.toml`, but never behind.
 
 ## Sources checked (2026-11-26)
 

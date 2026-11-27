@@ -15,30 +15,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- Private, loopback and link-local destinations are refused by default, for
+  the page and every resource it loads, when they connect (a WebSocket is
+  resolved again after its check; see the README). `localhost` and intranet
+  pages that rendered with 0.1.x now fail. `--allow-private` (CLI and
+  `cherrypi-fetch mcp`) and `RendererConfig::allow_private_networks` opt out,
+  for local testing.
+- Only `http` and `https` are fetched (`data`, `blob` and `about` are allowed
+  locally; other schemes, including `file:`, are refused). Ports on the Fetch
+  standard's bad-port list are refused.
 - `RendererConfig` gained an `allow_private_networks` field, so a struct
   literal needs updating; `RendererConfig::default()` is unchanged.
 
 ### Added
-
-- Agent plugins for Claude Code and Codex (an MCP server entry plus a skill),
-  and a Pi package (a `fetch_page` extension plus the skill). They install from
-  this repository's marketplaces; see "Use it from your agent" in the README.
-- Private, loopback and link-local destinations are refused by default, for
-  the page and every resource it loads, when they connect (a WebSocket is
-  resolved again after its check; see the README). Only `http` and
-  `https` are fetched (`data`, `blob` and `about` are allowed locally; other
-  schemes, including `file:`, are refused). Ports on the Fetch standard's
-  bad-port list are refused. `user:pass@` is stripped from the input URL.
-  `--allow-private` and `RendererConfig::allow_private_networks` opt out for
-  local testing.
-- `strip_userinfo` is public, so a caller can strip credentials the same way
-  the CLI does.
 
 - `cherrypi-fetch mcp`, a stdio MCP server with one tool, `fetch_page`. It
   renders a page in Servo and returns its title and text. Invalid input and a
   failed render are tool errors (`isError`). The server is behind the `mcp`
   feature, which is on by default. `--no-default-features --features cli`
   builds the command without it.
+- Agent plugins for Claude Code and Codex (an MCP server entry plus a skill),
+  and a Pi package (a `fetch_page` extension plus the skill). They install from
+  this repository's marketplaces; see "Use it from your agent" in the README.
+- `strip_userinfo` is public, so a caller can strip credentials the same way
+  the CLI does.
 
 ### Changed
 
@@ -47,16 +47,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DNS rebinding no longer moves a connection to a private address. Servo
   follows redirects itself, and every hop goes through the proxy. Proxy
   environment variables are ignored; they used to make the render fail.
+- URL userinfo (`user:pass@`) is stripped from the input URL by the CLI,
+  `render_page` and `fetch_page`, and never appears in their output. A load
+  whose URL still carries it, such as a subresource the page names, is
+  refused. Redirect targets that Servo follows itself are not covered; see the
+  README.
+- Same-origin script requests, which this crate fetches itself, decode gzip,
+  brotli, deflate and zstd bodies. Their redirects send each hop the page's
+  cookies for that URL and store each hop's `Set-Cookie`. A redirect that
+  leaves the origin is a network error (#19).
 - Redirect statuses: only 301, 302, 303, 307 and 308 with a `Location` are
   redirects. Other responses, such as a 300 or a 304, reach the page as they
   are.
-- A load whose URL carries `user:pass@` is refused before Servo fetches it.
-  Redirect targets that Servo follows itself are not covered; see the README.
-- The non-default `test-hooks` feature is now `__test-hooks`.
-
+- `fetch_page` clamps any `max_chars` above 200000, however large.
 - `rmcp` is a caret requirement (`3.12`), so library users are not pinned to
   one patch release. Install with `cargo install --locked` to build with the
   versions in `Cargo.lock`.
+- The non-default `test-hooks` feature is now `__test-hooks`.
 
 ### Fixed
 
@@ -75,7 +82,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subcommand, rather than reporting an invalid URL.
 - The `fetch_page` input schema states the ranges and defaults, and whole
   numbers sent as floats (`20.0`) are accepted.
-
 
 ## [0.1.1] - 2026-11-26
 
