@@ -11,19 +11,31 @@ use cherrypi_fetch::{
     RenderedPage, RendererConfig, DEFAULT_USER_AGENT, MAX_TIMEOUT, RENDER_TIMEOUT,
 };
 use clap::Parser;
+#[cfg(feature = "mcp")]
+use clap::Subcommand;
 use serde::Serialize;
+
+#[cfg(feature = "mcp")]
+mod mcp;
 
 #[derive(Parser)]
 #[command(
     name = "cherrypi-fetch",
     version,
     about = "Render web pages in Servo and print their visible text",
-    after_help = "Exit status: 0 all pages complete, 2 some page incomplete, 1 some page failed."
+    after_help = "Exit status: 0 all pages complete, 2 some page incomplete, 1 some page failed.",
+    // Options and URLs belong to the default mode; a subcommand takes none of them.
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true
 )]
 struct Args {
     /// http(s) URLs to render, one after another
     #[arg(required = true)]
     urls: Vec<String>,
+
+    #[cfg(feature = "mcp")]
+    #[command(subcommand)]
+    command: Option<Command>,
 
     /// Seconds allowed for each page to load and settle
     #[arg(
@@ -41,9 +53,25 @@ struct Args {
     #[arg(long)]
     json: bool,
 
+    /// Allow pages and their resources to reach loopback, private and other
+    /// non-public addresses. Use it only for local testing.
+    #[arg(long)]
+    allow_private: bool,
+
     /// Keep at most this many characters of each page's text
     #[arg(long)]
     max_chars: Option<usize>,
+}
+
+#[cfg(feature = "mcp")]
+#[derive(Subcommand)]
+enum Command {
+    /// Serve `fetch_page` to MCP clients over stdio (stdout carries only JSON-RPC)
+    Mcp {
+        /// Allow loopback, private and other non-public addresses for local testing
+        #[arg(long)]
+        allow_private: bool,
+    },
 }
 
 /// One URL's result, as printed with `--json`.
@@ -94,10 +122,27 @@ async fn main() -> ExitCode {
         }
     };
     init_logging();
+
+    #[cfg(feature = "mcp")]
+    if let Some(Command::Mcp { allow_private }) = args.command {
+        // Never returns: it exits the process once the server has stopped.
+        mcp::serve_stdio(allow_private).await;
+    }
+    // `mcp` only works on its own. After options, clap reads it as a URL, so say what happened.
+    #[cfg(feature = "mcp")]
+    if args.urls.len() == 1 && args.urls[0] == "mcp" {
+        eprintln!(
+            "cherrypi-fetch: `mcp` is a subcommand, not a URL. \
+             Run `cherrypi-fetch mcp` by itself."
+        );
+        return ExitCode::from(1);
+    }
+
     let _shutdown = Shutdown;
 
     if let Err(e) = cherrypi_fetch::configure(RendererConfig {
         user_agent: args.user_agent.clone(),
+        allow_private_networks: args.allow_private,
     }) {
         eprintln!("cherrypi-fetch: {e}");
         return ExitCode::from(1);
@@ -107,13 +152,17 @@ async fn main() -> ExitCode {
     let mut worst = Outcome::Complete;
     for (index, raw) in args.urls.iter().enumerate() {
         let started = Instant::now();
-        let result = match parse_url(raw) {
-            Ok(url) => cherrypi_fetch::render_page(url, timeout)
-                .await
-                .map_err(|e| e.to_string()),
-            Err(e) => Err(e),
+        let (result, display) = match parse_url(raw) {
+            Ok(url) => {
+                let display = url.to_string();
+                let result = cherrypi_fetch::render_page(url, timeout)
+                    .await
+                    .map_err(|e| e.to_string());
+                (result, display)
+            }
+            Err(e) => (Err(e), redact_url(raw)),
         };
-        let record = to_record(raw, result, args.max_chars, started.elapsed());
+        let record = to_record(&display, result, args.max_chars, started.elapsed());
         let outcome = if !record.ok {
             Outcome::Failed
         } else if record.incomplete.is_some() {
@@ -153,10 +202,23 @@ fn init_logging() {
 fn parse_url(raw: &str) -> Result<url::Url, String> {
     let url = url::Url::parse(raw).map_err(|e| format!("invalid URL: {e}"))?;
     match url.scheme() {
-        "http" | "https" => Ok(url),
-        other => Err(format!(
-            "unsupported URL scheme {other:?}: use http or https"
-        )),
+        "http" | "https" => {}
+        other => {
+            return Err(format!(
+                "unsupported URL scheme {other:?}: use http or https"
+            ));
+        }
+    }
+    // Never send user:pass@ to the host.
+    Ok(cherrypi_fetch::strip_userinfo(url))
+}
+
+/// Redact any userinfo from a URL for display. A URL that cannot be parsed is
+/// shown as a placeholder, so its credentials never appear in output.
+fn redact_url(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(url) => cherrypi_fetch::strip_userinfo(url).to_string(),
+        Err(_) => "<unparsable URL>".to_string(),
     }
 }
 
@@ -239,6 +301,39 @@ mod tests {
             .unwrap_err()
             .contains("scheme"));
         assert!(parse_url("not a url").unwrap_err().contains("invalid URL"));
+    }
+
+    #[test]
+    fn parses_urls_and_the_mcp_subcommand() {
+        assert!(Args::try_parse_from(["cherrypi-fetch", "https://example.com/"]).is_ok());
+        assert!(Args::try_parse_from(["cherrypi-fetch"]).is_err());
+        assert!(Args::try_parse_from(["cherrypi-fetch", "--json", "https://a.test/"]).is_ok());
+        #[cfg(feature = "mcp")]
+        {
+            let args = Args::try_parse_from(["cherrypi-fetch", "mcp"]).unwrap();
+            assert!(matches!(
+                args.command,
+                Some(Command::Mcp {
+                    allow_private: false
+                })
+            ));
+            let args = Args::try_parse_from(["cherrypi-fetch", "mcp", "--allow-private"]).unwrap();
+            assert!(matches!(
+                args.command,
+                Some(Command::Mcp {
+                    allow_private: true
+                })
+            ));
+            assert!(args.urls.is_empty());
+            // `mcp` takes no URLs or default-mode options.
+            assert!(Args::try_parse_from(["cherrypi-fetch", "mcp", "https://a.test/"]).is_err());
+            assert!(Args::try_parse_from(["cherrypi-fetch", "mcp", "--json"]).is_err());
+            // Before it, an option is parsed and `mcp` is read as a URL. main() reports that.
+            let args = Args::try_parse_from(["cherrypi-fetch", "--json", "mcp"]).unwrap();
+            assert!(args.command.is_none());
+            assert_eq!(args.urls, ["mcp"]);
+            assert!(args.json);
+        }
     }
 
     #[test]

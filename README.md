@@ -10,7 +10,7 @@ harness.
 
 ```sh
 cargo binstall cherrypi-fetch   # prebuilt binary, no Servo build
-cargo install cherrypi-fetch    # build from source
+cargo install --locked cherrypi-fetch    # build from source, with the locked dependency versions
 ```
 
 `cargo binstall` needs [cargo-binstall](https://github.com/cargo-bins/cargo-binstall)
@@ -49,6 +49,7 @@ cherrypi-fetch --json --max-chars 20000 https://a.example/ https://b.example/
 | `--user-agent <str>` | Windows Firefox 160 | User-Agent for the page and its requests |
 | `--json` | off | One JSON object per URL (JSON Lines) instead of text |
 | `--max-chars <n>` | none | Keep at most this many characters of each page's text |
+| `--allow-private` | off | Allow loopback, private and link-local destinations (local testing) |
 
 URLs are rendered one after another. Each one starts with no cookies, storage
 or cache left by the ones before it.
@@ -68,6 +69,22 @@ last snapshot taken. A failed record has `ok:false`, with `title` and `text`
 (even if others were incomplete) or the arguments were bad; 2 when at least
 one was incomplete and none failed.
 
+## MCP server
+
+Run `cherrypi-fetch mcp` as a stdio MCP server. Its `fetch_page` tool renders
+HTTP and HTTPS pages and returns their title and visible text. Private and
+loopback addresses are blocked by default; for local testing, start the server
+with `cherrypi-fetch mcp --allow-private`.
+
+The `max_chars` and `timeout_secs` arguments must be JSON numbers representable
+as finite doubles. Fractional parts below double precision are rounded.
+
+To smoke-test the tool list with MCP Inspector:
+
+```sh
+npx @modelcontextprotocol/inspector --cli cherrypi-fetch mcp --method tools/list
+```
+
 ## Library
 
 ```rust
@@ -75,6 +92,7 @@ one was incomplete and none failed.
 async fn demo() -> Result<(), cherrypi_fetch::RenderError> {
     cherrypi_fetch::configure(cherrypi_fetch::RendererConfig {
         user_agent: "MyTool/1.0".into(),
+        ..Default::default()
     })?; // optional; call before the first render
     let url = url::Url::parse("https://example.com/").unwrap();
     let result = cherrypi_fetch::render_page(url, cherrypi_fetch::RENDER_TIMEOUT).await;
@@ -127,13 +145,53 @@ captured no text, it fails (`ok:false`, exit 1).
 
 ## Limitations
 
-- **No private-address blocking.** A URL can point at localhost, a private
-  address or a cloud metadata endpoint, and the page and its resources are
-  fetched from it. Do not pass untrusted URLs from a network that has internal
-  hosts. Tracked in
-  [#6](https://github.com/kerryhatcher/CherryPi-Fetch/issues/6).
-- **Credentials in URLs are not stripped.** Tracked in
-  [#6](https://github.com/kerryhatcher/CherryPi-Fetch/issues/6).
+- **Private addresses are refused by default.** Only `http` and `https` are
+  fetched (`data`, `blob` and `about` are allowed locally; everything else,
+  including `file:`, is refused). The page and every resource it loads must
+  resolve to a public address. Loopback, private and link-local addresses
+  (including cloud metadata services such as 169.254.169.254) are blocked, and
+  `user:pass@` is stripped from the initial URL. Use `--allow-private` (or
+  `RendererConfig::allow_private_networks`) only for local testing.
+- **Servo's own connections go through a checking proxy.** Servo sends every
+  http and https connection through a proxy that this crate runs on
+  `127.0.0.1`. It checks each destination when it connects, and connects only
+  to the addresses it checked, so a second DNS answer cannot move a connection
+  to a private address (DNS rebinding). Redirects are followed by Servo, and
+  every hop goes through the proxy. Ports on the Fetch standard's bad-port
+  list are refused. The proxy takes its check from `--allow-private`, and its
+  own address is never a destination.
+- **Same-origin script requests are fetched here.** A same-origin GET from a
+  page script (XHR or fetch) is fetched by this crate, so a synchronous XHR to
+  a server that never answers gets a timeout. It is sent the page's cookies,
+  follows only same-origin redirects (301, 302, 303, 307 and 308 with a
+  `Location`), and is limited to 10 redirects. A proxied same-origin script
+  GET whose redirect leaves its origin fails with a network error, unlike a
+  browser, because the proxy keeps the 8-second synchronous XHR deadline; see
+  [issue #19](https://github.com/kerryhatcher/CherryPi-Fetch/issues/19). A
+  script fetch that starts out cross-origin and redirects is left to Servo,
+  which applies CORS. Pages that send `Referrer-Policy: no-referrer` get no
+  such timeout: their script requests are not recognised as same-origin, so
+  they are left to Servo.
+- **URL userinfo (`user:pass@`) is handled by entry point.** The CLI and
+  `render_page` strip it from the input URL before Servo sees it. A load
+  whose URL still carries it (for example a subresource the page names) is
+  refused. The proxied script-GET chain strips it from each redirect target.
+  For redirects Servo follows itself, the interceptor sees only the original
+  URL, so this check does not cover their targets. A top-level redirect to a
+  URL with userinfo can fail to finish within the render budget.
+- **The WebSocket connection is the one place DNS rebinding remains.** Servo
+  connects a WebSocket itself, without the proxy. The handshake is checked
+  before it is sent, but the connection is resolved again, so a server that
+  changes its answer between the two can point the socket at a private address.
+  Refusing WebSockets in default mode is not done, because pages that use them
+  would then fail.
+- **HTTP proxies in the environment are ignored.** `HTTP_PROXY`,
+  `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` do not change where requests go.
+  Requests go to the checking proxy, which connects to the destination
+  directly, so an upstream proxy is not supported.
+- **Dedicated worker fetches are covered; service workers are untested.** A
+  `data:` page can start a dedicated worker (there is a test), but it cannot
+  register a service worker, so that path is unverified.
 - **Not for CAPTCHA or login-walled pages.** A page that blocks automated
   browsers, or that needs a login, comes back blank or incomplete.
 - **Prebuilt archives are only published for x86_64 Linux (glibc 2.39+) and
@@ -156,10 +214,10 @@ that lists every dependency and its license text.
 project that owns the `servo-fetch` name on crates.io. It is a much larger
 tool: it renders to Markdown, JSON or PNG screenshots, crawls sites, maps
 URLs from sitemaps, and ships a Rust library, Python and Node.js SDKs, an MCP
-server and a Docker image. Its README also describes safety work this project
-does not do: it blocks private and reserved IP ranges and strips credentials
-from URLs. The `cherrypi-fetch` CLI refuses URLs that are not http or https;
-the library does not check the scheme.
+server and a Docker image. Its README says it blocks private and reserved IP
+ranges and strips credentials from URLs. `cherrypi-fetch` blocks private
+addresses by default and strips credentials from input URLs, within the
+limits listed under Limitations.
 
 `cherrypi-fetch` is deliberately smaller and focused on one job: return a
 page's title and visible text to a caller that may be an agent. Its behaviour
@@ -181,3 +239,10 @@ is built around pages that misbehave:
 
 It returns text (and a JSON record with `--json`), not Markdown, a screenshot
 or a schema, and it does not crawl.
+
+The non-default `__test-hooks` feature turns the private-address check off for
+the host and port pairs a test names. This crate's own tests enable it through
+a dev-dependency, so it is not on for downstream users. Do not enable it in a
+published build.
+
+Servo load failures are detected by matching the top-level DOM against Servo’s error-page templates. A page that imitates one is reported as a failed load.
