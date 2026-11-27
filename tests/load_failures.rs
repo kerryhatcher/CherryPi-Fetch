@@ -57,7 +57,38 @@ async fn classifies_main_document_loads() {
             .await
             .is_ok());
     }
+    // A local TLS server presents an untrusted self-signed certificate.
+    let tls_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tls_addr = tls_listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let cert = rustls::pki_types::CertificateDer::from(
+            include_bytes!("fixtures/untrusted-cert.der").to_vec(),
+        );
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(
+            include_bytes!("fixtures/untrusted-key.der").to_vec(),
+        );
+        let config = rustls::ServerConfig::builder_with_provider(
+            rustls::crypto::aws_lc_rs::default_provider().into(),
+        )
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert], key.into())
+        .unwrap();
+        if let Ok((mut socket, _)) = tls_listener.accept() {
+            let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut connection =
+                rustls::ServerConnection::new(std::sync::Arc::new(config)).unwrap();
+            while connection.is_handshaking() {
+                if connection.complete_io(&mut socket).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    let tls_url = format!("https://{tls_addr}/");
     for value in [
+        tls_url.as_str(),
         "data:text/plain;base64,%%%",
         "http://127.0.0.1:9/",
         "http://this-domain-does-not-exist.invalid/",
