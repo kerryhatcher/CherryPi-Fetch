@@ -482,22 +482,26 @@ const HOP_BY_HOP: &[&str] = &[
 /// available, it falls back to the text of a copy of the body with script,
 /// style, and template content removed.
 ///
-/// The error-page check runs last, entirely inside its own `try`, including
-/// the lookup of the prototype methods it uses. Page script can make any of
-/// those lookups throw, and the snapshot read before it must survive that.
+/// The fallback and the error-page check each run inside their own `try`,
+/// including the lookup of the prototype methods they use. Page script can
+/// make any of those lookups throw. A failed fallback gives empty text, and the
+/// title survives either way.
 const SNAPSHOT_SCRIPT: &str = "(function () {\
     var body = document.body;\
     var title = document.title;\
     if (!body) { return {title: title, text: '', error_page: ''}; }\
     var text = body.innerText;\
     if (typeof text !== 'string') {\
-        var copy = Node.prototype.cloneNode.call(body, true);\
-        var remove = Node.prototype.removeChild;\
-        var excluded = Element.prototype.querySelectorAll.call(copy, 'script, style, noscript, template');\
-        for (var i = 0; i < excluded.length; i++) {\
-            if (excluded[i].parentNode) { remove.call(excluded[i].parentNode, excluded[i]); }\
-        }\
-        text = copy.textContent;\
+        try {\
+            var copy = Node.prototype.cloneNode.call(body, true);\
+            var remove = Node.prototype.removeChild;\
+            var excluded = Element.prototype.querySelectorAll.call(copy, 'script, style, noscript, template');\
+            for (var i = 0; i < excluded.length; i++) {\
+                if (excluded[i].parentNode) { remove.call(excluded[i].parentNode, excluded[i]); }\
+            }\
+            text = copy.textContent;\
+        } catch (_) { text = ''; }\
+        if (typeof text !== 'string') { text = ''; }\
     }\
     var error = false;\
     try {\

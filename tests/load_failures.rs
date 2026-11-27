@@ -39,6 +39,8 @@ async fn classifies_main_document_loads() {
                 ("", "<html><body>shadow success<script>document.body.querySelector = undefined;</script></body></html>".to_string())
             } else if request.starts_with("GET /accessor ") {
                 ("", "<html><body>accessor success<script>Object.defineProperty(Element.prototype, 'querySelector', {get: function () { throw new Error('no'); }});</script></body></html>".to_string())
+            } else if request.starts_with("GET /fallback ") {
+                ("", "<html><head><title>fallback success</title></head><body>hidden<script>Object.defineProperty(HTMLElement.prototype, 'innerText', {get: function () { return undefined; }}); Object.defineProperty(Node.prototype, 'cloneNode', {get: function () { throw new Error('no'); }});</script></body></html>".to_string())
             } else if request.starts_with("GET /prototype ") {
                 ("", "<html><body>prototype success<script>Element.prototype.querySelector = undefined;</script></body></html>".to_string())
             } else {
@@ -64,6 +66,14 @@ async fn classifies_main_document_loads() {
         .unwrap();
         assert!(page.text.contains("success"), "{path}: {page:?}");
     }
+    // innerText is not a string and the fallback throws: the title survives.
+    let page = render_page(
+        format!("http://{addr}/fallback").parse().unwrap(),
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.title, "fallback success", "{page:?}");
     for value in ["data:text/html,<p>data success</p>"] {
         assert!(render_page(value.parse().unwrap(), Duration::from_secs(10))
             .await
