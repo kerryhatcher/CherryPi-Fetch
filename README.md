@@ -198,8 +198,9 @@ project that owns the `servo-fetch` name on crates.io. It is a much larger
 tool: it renders to Markdown, JSON or PNG screenshots, crawls sites, maps
 URLs from sitemaps, and ships a Rust library, Python and Node.js SDKs, an MCP
 server and a Docker image. Its README says it blocks private and reserved IP
-ranges and strips credentials from URLs; `cherrypi-fetch` now does both by
-default too.
+ranges and strips credentials from URLs. `cherrypi-fetch` blocks private
+addresses by default and strips credentials from input URLs, within the
+limits listed under Limitations.
 
 `cherrypi-fetch` is deliberately smaller and focused on one job: return a
 page's title and visible text to a caller that may be an agent. Its behaviour
