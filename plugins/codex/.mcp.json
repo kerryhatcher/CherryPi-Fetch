@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cherrypi-fetch": {
+      "command": "cherrypi-fetch",
+      "args": ["mcp"]
+    }
+  }
+}

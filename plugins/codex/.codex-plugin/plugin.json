@@ -1,0 +1,31 @@
+{
+  "name": "cherrypi-fetch",
+  "version": "0.2.0",
+  "description": "Fetch JavaScript-rendered pages through Servo and return their visible text.",
+  "author": {
+    "name": "Kerry Hatcher",
+    "url": "https://github.com/kerryhatcher"
+  },
+  "homepage": "https://github.com/kerryhatcher/CherryPi-Fetch",
+  "repository": "https://github.com/kerryhatcher/CherryPi-Fetch",
+  "license": "MIT",
+  "keywords": [
+    "web-fetch",
+    "servo",
+    "spa",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "CherryPi Fetch",
+    "shortDescription": "Fetch JavaScript-rendered pages through Servo.",
+    "longDescription": "Render JavaScript-heavy pages, SPAs and other pages a plain fetch cannot read. Returns the page title and visible text, with an explicit reason when the page did not settle.",
+    "developerName": "Kerry Hatcher",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://github.com/kerryhatcher/CherryPi-Fetch"
+  }
+}

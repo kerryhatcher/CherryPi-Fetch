@@ -1,0 +1,29 @@
+{
+  "name": "cherrypi-fetch",
+  "description": "Servo-backed page fetching for agents that need JavaScript-rendered pages.",
+  "owner": {
+    "name": "Kerry Hatcher",
+    "url": "https://github.com/kerryhatcher"
+  },
+  "plugins": [
+    {
+      "name": "cherrypi-fetch",
+      "source": "./plugins/claude-code",
+      "description": "Fetch JavaScript-rendered pages through Servo and return their visible text.",
+      "version": "0.2.0",
+      "author": {
+        "name": "Kerry Hatcher",
+        "url": "https://github.com/kerryhatcher"
+      },
+      "homepage": "https://github.com/kerryhatcher/CherryPi-Fetch",
+      "repository": "https://github.com/kerryhatcher/CherryPi-Fetch",
+      "license": "MIT",
+      "keywords": [
+        "web-fetch",
+        "servo",
+        "spa",
+        "mcp"
+      ]
+    }
+  ]
+}
