@@ -1401,7 +1401,8 @@ fn render_one(
     }
 
     let snap = snapshot.borrow();
-    if snap.opaque_origin {
+    if snap.opaque_origin && job.url.scheme() != "data" {
+        // A data: document has an opaque origin even when it loads successfully.
         // Servo's error page is showing, so the main document did not load. The
         // first line of its text is Servo's reason, such as "Could not load the
         // requested page: client error (Connect)". The rest of the page (a TLS
