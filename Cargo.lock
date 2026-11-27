@@ -5157,7 +5157,6 @@ dependencies = [
  "servo-config",
  "servo-constellation",
  "servo-constellation-traits",
- "servo-default-resources",
  "servo-devtools",
  "servo-devtools-traits",
  "servo-embedder-traits",
@@ -5411,15 +5410,6 @@ dependencies = [
  "uuid",
  "webrender_api",
  "zeroize",
-]
-
-[[package]]
-name = "servo-default-resources"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bd5df0724a6b49aba27fbfaeb124abd646cc8c362a013c6bf87d9cc8d2315b4"
-dependencies = [
- "servo-embedder-traits",
 ]
 
 [[package]]

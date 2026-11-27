@@ -49,6 +49,7 @@ use servo::{
 };
 
 mod guard_proxy;
+mod servo_resources;
 
 /// User-Agent sent when [`configure`] is not called. It claims Windows on
 /// purpose: some sites hang requests from desktop Linux user agents.
@@ -483,14 +484,17 @@ const HOP_BY_HOP: &[&str] = &[
 /// style, and template content removed.
 const SNAPSHOT_SCRIPT: &str = "(function () {\
     var body = document.body;\
-    if (!body) { return {title: document.title, text: '', origin: window.origin}; }\
+    if (!body) { return {title: document.title, text: '', error_page: ''}; }\
     var text = body.innerText;\
     if (typeof text !== 'string') {\
         var copy = body.cloneNode(true);\
         copy.querySelectorAll('script, style, noscript, template').forEach(function (node) { node.remove(); });\
         text = copy.textContent;\
     }\
-    return {title: document.title, text: text, origin: window.origin};\
+    var error = (document.title === 'Error loading page' && body.querySelector('p') && body.querySelector('p').textContent.startsWith('Could not load the requested page:')) ||\
+        (document.title === 'Certificate error' && body.querySelector('#leave') && body.querySelector('#allow') && body.querySelector('#bytes')) ||\
+        (body.querySelector('p') && body.querySelector('p').textContent === 'Servo crashed!' && body.querySelector('button') && body.querySelector('pre plaintext'));\
+    return {title: document.title, text: text, error_page: error ? 'yes' : ''};\
 })()";
 
 /// A rendered page: its title and the visible text, one line per block.
@@ -746,10 +750,8 @@ struct Snapshot {
     pending: bool,
     /// Successful samples received so far.
     samples: u32,
-    /// The document's origin is opaque. Servo gives its own error page an opaque
-    /// origin when the main document could not be loaded: connection refused,
-    /// DNS failure, a bad port, or a TLS failure. A page that loaded has a real origin.
-    opaque_origin: bool,
+    /// The top-level DOM matches one of Servo’s error templates.
+    error_page: bool,
 }
 
 /// Receives the page's resource requests. Every load is held until the render
@@ -1290,6 +1292,7 @@ fn render_one(
     context: &Rc<SoftwareRenderingContext>,
     job: &Job,
 ) -> Result<RenderedPage, String> {
+    servo_resources::ERROR_TEMPLATE_READ.store(false, std::sync::atomic::Ordering::SeqCst);
     reset_site_state(servo);
     let rendering: Rc<dyn RenderingContext> = context.clone();
     let delegate = Rc::new(PageDelegate::default());
@@ -1360,7 +1363,7 @@ fn render_one(
                     if let Ok(JSValue::Object(fields)) = result {
                         snap.title = string_field(&fields, "title");
                         snap.text = string_field(&fields, "text");
-                        snap.opaque_origin = string_field(&fields, "origin") == "null";
+                        snap.error_page = string_field(&fields, "error_page") == "yes";
                         snap.samples += 1;
                     }
                 });
@@ -1401,8 +1404,11 @@ fn render_one(
     }
 
     let snap = snapshot.borrow();
-    if snap.opaque_origin && job.url.scheme() != "data" {
-        // A data: document has an opaque origin even when it loads successfully.
+    // A page can imitate the template after an iframe fails; in that case it
+    // is classified as failed. The flag alone cannot distinguish failed frames.
+    if snap.error_page
+        && servo_resources::ERROR_TEMPLATE_READ.load(std::sync::atomic::Ordering::SeqCst)
+    {
         // Servo's error page is showing, so the main document did not load. The
         // first line of its text is Servo's reason, such as "Could not load the
         // requested page: client error (Connect)". The rest of the page (a TLS

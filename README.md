@@ -241,3 +241,5 @@ The non-default `__test-hooks` feature turns the private-address check off for
 the host and port pairs a test names. This crate's own tests enable it through
 a dev-dependency, so it is not on for downstream users. Do not enable it in a
 published build.
+
+Servo load failures are detected using its error templates. A page that imitates a Servo error page after an error template has been loaded during its render can be reported as a failed load.
