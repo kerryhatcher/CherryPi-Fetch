@@ -1,6 +1,6 @@
 //! A redirected load must be checked too (N1).
 //!
-//! The `test-hooks` feature marks a chosen loopback host and port as public, so a
+//! The `__test-hooks` feature marks a chosen loopback host and port as public, so a
 //! redirect can be exercised without a real public address:
 //!
 //! ```sh

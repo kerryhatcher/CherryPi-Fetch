@@ -135,27 +135,36 @@ captured no text, it fails (`ok:false`, exit 1).
   (including cloud metadata services such as 169.254.169.254) are blocked, and
   `user:pass@` is stripped from URLs. Use `--allow-private` (or
   `RendererConfig::allow_private_networks`) only for local testing.
-- **Redirects are re-fetched, not followed by Servo.** In default mode a
-  redirect hop that Servo would follow is re-requested by this crate, and the
-  final response is handed back to the render. The first hop is therefore
-  requested twice. Each hop is checked before it is requested: its scheme, and
-  its address, which must be public (the request is then pinned to the
-  checked addresses). A redirect may move to another host, provided that host
-  is also public. Within a chain, each hop is sent the page's cookies for its
-  own URL, and each hop's `Set-Cookie` is stored for the hops after it. Only
-  GET and HEAD hops are followed (a HEAD stays HEAD), compressed bodies are
-  decoded (gzip, brotli, deflate and zstd), and `user:pass@` is stripped from
-  each `Location`. A chain is limited to 10 redirects. A cross-origin script
-  fetch (fetch/XHR) that redirects is refused outright, because Servo's CORS
-  check cannot be applied to an intercepted hop.
-- **DNS rebinding is only partly closed.** Requests this crate makes itself
-  are pinned to the addresses that were checked. The ones Servo makes are
-  resolved again when it connects, so a server that changes its answer
-  between the check and the connect can swap a public address for a private
-  one.
-- **HTTP proxies are refused.** If `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY`
-  is set, the render fails unless private networks are allowed, because Servo
-  would send the request through the proxy instead of the checked path.
+- **Servo's own connections go through a checking proxy.** Servo sends every
+  http and https connection through a proxy that this crate runs on
+  `127.0.0.1`. It checks each destination when it connects, and connects only
+  to the addresses it checked, so a second DNS answer cannot move a connection
+  to a private address (DNS rebinding). Redirects are followed by Servo, and
+  every hop goes through the proxy. Ports on the Fetch standard's bad-port
+  list are refused. The proxy takes its check from `--allow-private`, and its
+  own address is never a destination.
+- **Same-origin script requests are fetched here.** A same-origin GET from a
+  page script (XHR or fetch) is fetched by this crate, so a synchronous XHR to
+  a server that never answers gets a timeout. It is sent the page's cookies,
+  follows only same-origin redirects (301, 302, 303, 307 and 308 with a
+  `Location`), and is limited to 10 redirects. A cross-origin script fetch that
+  redirects is left to Servo, which applies CORS. Pages that send
+  `Referrer-Policy: no-referrer` get no such timeout: their script requests are
+  not recognised as same-origin, so they are left to Servo.
+- **Credentials are refused.** A URL that carries `user:pass@` is refused
+  before Servo fetches it. Servo's own fetch of a top-level redirect to such a
+  URL never completes, and the credentials must not reach a host that named
+  them in a redirect. The render then reports a failure after its budget.
+- **The WebSocket connection is the one place DNS rebinding remains.** Servo
+  connects a WebSocket itself, without the proxy. The handshake is checked
+  before it is sent, but the connection is resolved again, so a server that
+  changes its answer between the two can point the socket at a private address.
+  Refusing WebSockets in default mode is not done, because pages that use them
+  would then fail.
+- **HTTP proxies in the environment are ignored.** `HTTP_PROXY`,
+  `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` do not change where requests go.
+  Requests go to the checking proxy, which connects to the destination
+  directly, so an upstream proxy is not supported.
 - **Dedicated worker fetches are covered; service workers are untested.** A
   `data:` page can start a dedicated worker (there is a test), but it cannot
   register a service worker, so that path is unverified.
@@ -207,7 +216,7 @@ is built around pages that misbehave:
 It returns text (and a JSON record with `--json`), not Markdown, a screenshot
 or a schema, and it does not crawl.
 
-The non-default `test-hooks` feature turns the private-address check off for
+The non-default `__test-hooks` feature turns the private-address check off for
 the host and port pairs a test names. This crate's own tests enable it through
 a dev-dependency, so it is not on for downstream users. Do not enable it in a
 published build.

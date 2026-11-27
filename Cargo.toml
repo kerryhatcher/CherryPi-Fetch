@@ -26,7 +26,7 @@ default = ["cli"]
 # The `cherrypi-fetch` command-line tool. Library users can turn it off.
 cli = ["dep:clap", "dep:serde", "dep:serde_json", "dep:tracing-subscriber"]
 # Test-only hooks for the integration tests. Not part of the public API.
-test-hooks = []
+__test-hooks = []
 
 [[bin]]
 name = "cherrypi-fetch"
@@ -63,6 +63,6 @@ pkg-fmt = "tgz"
 bin-dir = "{ bin }{ binary-ext }"
 
 # Only this crate's own tests turn the address-check bypass on: the dev-dependency
-# enables the test-hooks feature for `cargo test`, and downstream users never see it.
+# enables the __test-hooks feature for `cargo test`, and downstream users never see it.
 [dev-dependencies]
-cherrypi-fetch = { path = ".", features = ["test-hooks"] }
+cherrypi-fetch = { path = ".", features = ["__test-hooks"] }

@@ -18,30 +18,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Redirects are now checked. In default mode a redirect hop that Servo would
-  follow is re-requested by this crate. Each hop's scheme and address are
-  checked and pinned before it is requested, and the final response is handed
-  back to the render, so a redirect to a private address is refused. The first
-  hop is requested twice. A redirect may move to another host when that host is
-  also public. Each hop is sent the page's cookies for its own URL, and each
-  hop's `Set-Cookie` is stored for the hops after it. HEAD stays HEAD, and
-  compressed bodies are decoded. A cross-origin script fetch that redirects is
-  refused. With `allow_private_networks` set, Servo follows redirects as before.
+- Servo's own connections go through a checking proxy. Each connection is
+  checked when it is made, and connects only to the address it checked, so
+  DNS rebinding no longer moves a connection to a private address. Servo
+  follows redirects itself, and every hop goes through the proxy. Proxy
+  environment variables are ignored; they used to make the render fail.
+- Redirect statuses: only 301, 302, 303, 307 and 308 with a `Location` are
+  redirects. Other responses, such as a 300 or a 304, reach the page as they
+  are.
+- Requests with `user:pass@` in their URL are refused before Servo fetches
+  them.
+- The non-default `test-hooks` feature is now `__test-hooks`.
 
 ### Added
 
 - Private, loopback and link-local destinations are refused by default, for
-  the page and every resource it loads, after DNS resolution. Only `http` and
+  the page and every resource it loads, when they connect. Only `http` and
   `https` are fetched (`data`, `blob` and `about` are allowed locally; other
-  schemes, including `file:`, are refused). Proxy environment variables are
-  refused, and `user:pass@` is stripped from URLs.
+  schemes, including `file:`, are refused). Ports on the Fetch standard's
+  bad-port list are refused. `user:pass@` is stripped from URLs.
   `--allow-private` and `RendererConfig::allow_private_networks` opt out for
   local testing.
 - `strip_userinfo` is public, so a caller can strip credentials the same way
   the CLI does.
-- Requests this crate makes itself are pinned to the addresses that were
-  checked, so a second DNS answer cannot move the connection.
-
 
 ## [0.1.0] - 2026-11-26
 

@@ -309,7 +309,7 @@ pub(crate) async fn check_host(
     }
     // A test can mark a host and port as public, so a redirect away from a
     // loopback origin can be exercised without a real public address.
-    #[cfg(feature = "test-hooks")]
+    #[cfg(feature = "__test-hooks")]
     if test_public_origin(host, port) {
         return Ok(ips);
     }
@@ -392,16 +392,16 @@ pub(crate) fn test_lookup_count(host: &str) -> usize {
 
 /// Host and port pairs an integration test has marked as public. See
 /// [`set_test_public_origins`].
-#[cfg(feature = "test-hooks")]
+#[cfg(feature = "__test-hooks")]
 static TEST_PUBLIC_ORIGINS: Mutex<Vec<(String, u16)>> = Mutex::new(Vec::new());
 
 /// Mark host and port pairs as public for the address check, so an integration
 /// test can point a redirect at loopback from a "public" origin. Each pair
 /// matches one host string exactly as the URL spells it (for example
 /// `"127.0.0.1"`) and one port, so marking a port does not mark other hosts on
-/// it. A test hook behind the non-default `test-hooks` feature, not for general
+/// it. A test hook behind the non-default `__test-hooks` feature, not for general
 /// use.
-#[cfg(feature = "test-hooks")]
+#[cfg(feature = "__test-hooks")]
 #[doc(hidden)]
 pub fn set_test_public_origins(origins: &[(&str, u16)]) {
     if let Ok(mut guard) = TEST_PUBLIC_ORIGINS.lock() {
@@ -412,7 +412,7 @@ pub fn set_test_public_origins(origins: &[(&str, u16)]) {
     }
 }
 
-#[cfg(feature = "test-hooks")]
+#[cfg(feature = "__test-hooks")]
 fn test_public_origin(host: &str, port: u16) -> bool {
     TEST_PUBLIC_ORIGINS
         .lock()
@@ -433,7 +433,7 @@ fn test_resolver_lookup(host: &str) -> Option<Vec<IpAddr>> {
 
 /// How many connections Servo has tunnelled through the checking proxy. A test
 /// hook: it shows that a request really went through the check.
-#[cfg(feature = "test-hooks")]
+#[cfg(feature = "__test-hooks")]
 #[doc(hidden)]
 pub fn proxied_tunnel_count() -> u64 {
     guard_proxy::tunnels_opened()
