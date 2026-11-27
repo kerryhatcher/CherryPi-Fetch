@@ -8,11 +8,9 @@
 //! - `/x` redirects to another origin: a script request may not leave its
 //!   origin, because Servo's CORS check cannot apply to the hop.
 //!
-//! Run with `cargo test --test redirect_xhr`.
+//! Run with `cargo test --test integration`.
 
-mod common;
-
-use common::{mark_public, render, serve, setup, Reply};
+use crate::common::{mark_public, render, serve, setup, Reply};
 
 /// A page whose script fetches `path` synchronously and reports the outcome.
 fn page(path: &str) -> Reply {
@@ -26,8 +24,7 @@ fn page(path: &str) -> Reply {
     ))
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_script_request_redirect_is_checked_on_every_hop() {
+pub async fn a_script_request_redirect_is_checked_on_every_hop() {
     setup();
 
     // Case 1: a redirect to a hostname that resolves to loopback.
@@ -88,5 +85,4 @@ async fn a_script_request_redirect_is_checked_on_every_hop() {
         !cross.text.contains("OTHER-ORIGIN"),
         "the other origin's body reached the page: {cross:?}"
     );
-    cherrypi_fetch::shutdown_renderer();
 }

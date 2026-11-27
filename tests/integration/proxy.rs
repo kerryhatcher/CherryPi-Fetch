@@ -3,22 +3,19 @@
 //!
 //! Its own test binary: the renderer runs Servo once per process.
 
-mod common;
+use cherrypi_fetch::{proxied_tunnel_count, RenderedPage};
 
-use cherrypi_fetch::{proxied_tunnel_count, shutdown_renderer, RenderedPage};
+use crate::common::Reply;
 
-use common::Reply;
-
-#[tokio::test(flavor = "multi_thread")]
-async fn plain_http_is_tunnelled_through_the_checking_proxy() {
-    common::setup();
-    let server = common::serve("127.0.0.1:0", |_| {
+pub async fn plain_http_is_tunnelled_through_the_checking_proxy() {
+    crate::common::setup();
+    let server = crate::common::serve("127.0.0.1:0", |_| {
         Reply::html("<html><body>tunnelled-marker</body></html>")
     });
-    common::mark_public(&[("127.0.0.1", server.port)]);
+    crate::common::mark_public(&[("127.0.0.1", server.port)]);
 
     let before = proxied_tunnel_count();
-    let page: RenderedPage = common::render(&format!("http://127.0.0.1:{}/", server.port))
+    let page: RenderedPage = crate::common::render(&format!("http://127.0.0.1:{}/", server.port))
         .await
         .expect("the page should render through the proxy");
     assert!(
@@ -29,6 +26,4 @@ async fn plain_http_is_tunnelled_through_the_checking_proxy() {
         proxied_tunnel_count() > before,
         "the page was fetched without the checking proxy"
     );
-
-    shutdown_renderer();
 }

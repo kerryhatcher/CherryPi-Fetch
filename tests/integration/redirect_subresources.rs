@@ -5,10 +5,8 @@
 //!
 //! Its own test binary: the renderer runs Servo once per process.
 
-mod common;
-
-use cherrypi_fetch::{shutdown_renderer, RenderedPage};
-use common::Reply;
+use crate::common::Reply;
+use cherrypi_fetch::RenderedPage;
 
 /// A 1x1 transparent PNG.
 const PNG: &[u8] = &[
@@ -38,12 +36,11 @@ const PAGE: &str = "<html><head><title>Redirected subresources</title>\
     document.getElementById('pic').addEventListener('error', report);\
     </script></body></html>";
 
-#[tokio::test(flavor = "multi_thread")]
-async fn redirected_scripts_stylesheets_and_images_apply_in_default_mode() {
-    common::setup();
+pub async fn redirected_scripts_stylesheets_and_images_apply_in_default_mode() {
+    crate::common::setup();
 
     // The cross-origin target: a script and an image, reached by redirect.
-    let target = common::serve("127.0.0.1:0", |req| match req.route() {
+    let target = crate::common::serve("127.0.0.1:0", |req| match req.route() {
         "/j.js" => Reply::ok_with_type(b"window.jsA = 'yes';".to_vec(), "text/javascript"),
         "/p.png" => Reply::ok_with_type(PNG.to_vec(), "image/png"),
         _ => Reply::not_found(),
@@ -51,7 +48,7 @@ async fn redirected_scripts_stylesheets_and_images_apply_in_default_mode() {
     let target_port = target.port;
 
     // The origin: the page, the same-origin targets, and the redirects to both.
-    let origin = common::serve("127.0.0.1:0", move |req| match req.route() {
+    let origin = crate::common::serve("127.0.0.1:0", move |req| match req.route() {
         "/" => Reply::html(PAGE),
         "/rj" => Reply::redirect(&format!("http://127.0.0.1:{target_port}/j.js")),
         "/rjs" => Reply::redirect("/js2.js"),
@@ -62,9 +59,9 @@ async fn redirected_scripts_stylesheets_and_images_apply_in_default_mode() {
         "/ri" => Reply::redirect(&format!("http://127.0.0.1:{target_port}/p.png")),
         _ => Reply::not_found(),
     });
-    common::mark_public(&[("127.0.0.1", origin.port), ("127.0.0.1", target_port)]);
+    crate::common::mark_public(&[("127.0.0.1", origin.port), ("127.0.0.1", target_port)]);
 
-    let page: RenderedPage = common::render(&format!("http://127.0.0.1:{}/", origin.port))
+    let page: RenderedPage = crate::common::render(&format!("http://127.0.0.1:{}/", origin.port))
         .await
         .expect("the page should render");
     assert!(
@@ -82,6 +79,4 @@ async fn redirected_scripts_stylesheets_and_images_apply_in_default_mode() {
         "a redirected stylesheet did not apply: {:?}",
         page.text
     );
-
-    shutdown_renderer();
 }

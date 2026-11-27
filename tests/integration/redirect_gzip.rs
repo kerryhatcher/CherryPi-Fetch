@@ -2,11 +2,9 @@
 //! same-origin script request this crate proxies. The fixture is a gzip stream
 //! of `GZIP-TARGET-TEXT`, made with Python's `gzip` module (mtime 0).
 //!
-//! Run with `cargo test --test redirect_gzip`.
+//! Run with `cargo test --test integration`.
 
-mod common;
-
-use common::{mark_public, render, serve, setup, Reply};
+use crate::common::{mark_public, render, serve, setup, Reply};
 
 /// `gzip(b"GZIP-TARGET-TEXT")`, 36 bytes.
 const GZIP_TEXT: &[u8] = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\x73\x8f\xf2\x0c\xd0\x0d\x71\x0c\x72\x77\x0d\xd1\x0d\x71\x8d\x08\x01\x00\xf1\x37\x95\xe4\x10\x00\x00\x00";
@@ -16,8 +14,7 @@ fn gzip_reply() -> Reply {
         .with_header("Content-Encoding", "gzip")
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn compressed_bodies_are_delivered_decoded() {
+pub async fn compressed_bodies_are_delivered_decoded() {
     setup();
     let origin = serve("127.0.0.1:0", |req| {
         match req.route() {
@@ -54,5 +51,4 @@ async fn compressed_bodies_are_delivered_decoded() {
         scripted.text.contains("XHR:GZIP-TARGET-TEXT CE:none"),
         "a compressed script response was not delivered decoded: {scripted:?}"
     );
-    cherrypi_fetch::shutdown_renderer();
 }

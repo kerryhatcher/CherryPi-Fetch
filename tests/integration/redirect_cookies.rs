@@ -3,14 +3,11 @@
 //! crate, so the jar's cookies must be sent on each of them, and each hop's own
 //! `Set-Cookie` must be stored for the hops after it.
 //!
-//! Run with `cargo test --test redirect_cookies`.
+//! Run with `cargo test --test integration`.
 
-mod common;
+use crate::common::{mark_public, render, serve, setup, Reply};
 
-use common::{mark_public, render, serve, setup, Reply};
-
-#[tokio::test(flavor = "multi_thread")]
-async fn cookies_are_sent_and_stored_on_every_redirect_hop() {
+pub async fn cookies_are_sent_and_stored_on_every_redirect_hop() {
     setup();
     let origin = serve("127.0.0.1:0", |req| match req.route() {
         "/c" => Reply::redirect("/d").with_header("Set-Cookie", "sid=abc123; Path=/"),
@@ -68,5 +65,4 @@ async fn cookies_are_sent_and_stored_on_every_redirect_hop() {
         "a cookie set by 127.0.0.1 was sent to localhost"
     );
     assert!(page.text.contains("other host"), "page: {page:?}");
-    cherrypi_fetch::shutdown_renderer();
 }

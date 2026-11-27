@@ -100,14 +100,6 @@ jobs:
         run: cargo clippy --all-targets --features test-hooks --locked -- -D warnings
       - name: Test
         run: cargo test --locked
-      # The redirect tests are separate binaries. The cross-host one binds
-      # 127.0.0.2, which only Linux has by default, so it runs here alone.
-      - name: Redirect tests
-        run: >-
-          cargo test --features test-hooks --locked
-          --test redirect --test redirect_cookies --test redirect_method
-          --test redirect_cors --test redirect_gzip --test redirect_cross_host
-          --test redirect_userinfo
       - name: Build without default features
         run: cargo build --no-default-features --locked
       - name: Publish dry run

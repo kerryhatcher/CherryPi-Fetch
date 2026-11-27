@@ -1,11 +1,9 @@
 //! A HEAD request that redirects keeps its method on the chained hop (F8).
 //! The hop is fetched by this crate, so it must arrive as HEAD, not GET.
 //!
-//! Run with `cargo test --test redirect_method`.
+//! Run with `cargo test --test integration`.
 
-mod common;
-
-use common::{mark_public, render, serve, setup, Reply};
+use crate::common::{mark_public, render, serve, setup, Reply};
 
 const PAGE: &str = "<html><body><script>\
     var x = new XMLHttpRequest();\
@@ -14,8 +12,7 @@ const PAGE: &str = "<html><body><script>\
     document.body.textContent = 'HEAD-STATUS:' + x.status;\
     </script></body></html>";
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_redirected_head_request_stays_a_head_request() {
+pub async fn a_redirected_head_request_stays_a_head_request() {
     setup();
     let origin = serve("127.0.0.1:0", |req| match req.route() {
         "/" => Reply::html(PAGE),
@@ -45,5 +42,4 @@ async fn a_redirected_head_request_stays_a_head_request() {
         page.text.contains("HEAD-STATUS:200"),
         "the page did not get the HEAD response: {page:?}"
     );
-    cherrypi_fetch::shutdown_renderer();
 }

@@ -4,14 +4,11 @@
 //! must never reach the page. The target may be requested, on the same host and
 //! port the script already named: it is an ordinary request that CORS then blocks.
 //!
-//! Run with `cargo test --test redirect_cors`.
+//! Run with `cargo test --test integration`.
 
-mod common;
+use crate::common::{mark_public, render, serve, setup, Reply};
 
-use common::{mark_public, render, serve, setup, Reply};
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_cross_origin_script_fetch_that_redirects_is_refused() {
+pub async fn a_cross_origin_script_fetch_that_redirects_is_refused() {
     setup();
     // A second origin (another port, so another origin) that redirects a
     // script fetch to a page with no CORS header.
@@ -50,5 +47,4 @@ async fn a_cross_origin_script_fetch_that_redirects_is_refused() {
         page.text.contains("RESULT:"),
         "the script did not run: {page:?}"
     );
-    cherrypi_fetch::shutdown_renderer();
 }

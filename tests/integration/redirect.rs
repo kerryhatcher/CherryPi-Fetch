@@ -4,7 +4,7 @@
 //! redirect can be exercised without a real public address:
 //!
 //! ```sh
-//! cargo test --features test-hooks --test redirect
+//! cargo test --test integration
 //! ```
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -13,9 +13,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use cherrypi_fetch::{
-    configure, render_page, set_test_public_origins, shutdown_renderer, RendererConfig,
-};
+use cherrypi_fetch::{configure, render_page, set_test_public_origins, RendererConfig};
 
 fn clear_proxy_env() {
     for name in [
@@ -123,8 +121,7 @@ fn base64(data: &[u8]) -> String {
     out
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_redirect_to_loopback_is_refused() {
+pub async fn a_redirect_to_loopback_is_refused() {
     clear_proxy_env();
     let (secret_port, secret_hits) = counting_server("LOOPBACK-SECRET");
     let top_port = redirect_server(&format!("http://127.0.0.1:{secret_port}/secret"));
@@ -180,6 +177,4 @@ async fn a_redirect_to_loopback_is_refused() {
         page.text.contains("REDIRECT-FINAL-PAGE"),
         "a public redirect did not render the target: {page:?}"
     );
-
-    shutdown_renderer();
 }

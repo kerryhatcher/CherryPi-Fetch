@@ -10,22 +10,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use cherrypi_fetch::{configure, render_page, shutdown_renderer, RendererConfig};
-
-/// A proxy in the environment would refuse every render, so clear it before
-/// the test starts.
-fn clear_proxy_env() {
-    for name in [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    ] {
-        std::env::remove_var(name);
-    }
-}
+use cherrypi_fetch::render_page;
 
 /// A server that counts every request it receives and answers `secret`.
 fn counting_server() -> (String, Arc<AtomicUsize>) {
@@ -101,14 +86,8 @@ fn data_page(html: &str) -> url::Url {
     .unwrap()
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn blocks_private_and_non_http_destinations() {
-    clear_proxy_env();
-    configure(RendererConfig {
-        user_agent: "ssrf-test/1.0".into(),
-        allow_private_networks: false,
-    })
-    .unwrap();
+pub async fn blocks_private_and_non_http_destinations() {
+    crate::common::setup();
 
     // A non-http top-level scheme is refused before the renderer starts.
     let file = url::Url::parse("file:///etc/hostname").unwrap();
@@ -200,6 +179,4 @@ async fn blocks_private_and_non_http_destinations() {
         0,
         "requests from a finished render reached the network"
     );
-
-    shutdown_renderer();
 }

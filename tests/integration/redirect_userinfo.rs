@@ -4,18 +4,15 @@
 //! credentials must not reach the target in any case. The target sees no
 //! Authorization header, and the secret appears in no header it receives.
 //!
-//! Run with `cargo test --test redirect_userinfo`.
-
-mod common;
+//! Run with `cargo test --test integration`.
 
 use std::sync::{Arc, OnceLock};
 
-use common::{mark_public, render, serve, setup, Reply};
+use crate::common::{mark_public, render, serve, setup, Reply};
 
 const SECRET: &str = "s3cret-password";
 
-#[tokio::test(flavor = "multi_thread")]
-async fn userinfo_in_a_redirect_location_is_not_sent() {
+pub async fn userinfo_in_a_redirect_location_is_not_sent() {
     setup();
     // The Location names this server's own port, which is known only after it
     // is bound, so the route reads it from a cell set straight away.
@@ -53,5 +50,4 @@ async fn userinfo_in_a_redirect_location_is_not_sent() {
         !text.contains("USERINFO-TARGET"),
         "the target's body reached the page: {text:?}"
     );
-    cherrypi_fetch::shutdown_renderer();
 }

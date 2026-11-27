@@ -2,11 +2,9 @@
 //! with a `Location` and a 304 with none are ordinary responses, and the page
 //! sees them as they are.
 //!
-//! Run with `cargo test --test redirect_statuses`.
+//! Run with `cargo test --test integration`.
 
-mod common;
-
-use common::{mark_public, render, serve, setup, Reply};
+use crate::common::{mark_public, render, serve, setup, Reply};
 
 const PAGE: &str = "<html><body><div id=\"out\">before</div>\
     <script>\
@@ -18,8 +16,7 @@ const PAGE: &str = "<html><body><div id=\"out\">before</div>\
     document.getElementById('out').textContent = 'RESULT:' + status('/n304') + ':' + status('/m300');\
     </script></body></html>";
 
-#[tokio::test(flavor = "multi_thread")]
-async fn only_the_five_redirect_statuses_are_followed() {
+pub async fn only_the_five_redirect_statuses_are_followed() {
     setup();
     let origin = serve("127.0.0.1:0", |req| match req.route() {
         "/" => Reply::html(PAGE),
@@ -51,5 +48,4 @@ async fn only_the_five_redirect_statuses_are_followed() {
         origin.hits("/elsewhere").is_empty(),
         "a 300 was followed as a redirect"
     );
-    cherrypi_fetch::shutdown_renderer();
 }

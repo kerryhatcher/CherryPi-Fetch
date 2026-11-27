@@ -3,14 +3,11 @@
 //! response, so the page cannot read the rules: `cssRules` throws
 //! `SecurityError`, as it does with the address check off.
 //!
-//! Run with `cargo test --test redirect_taint`.
+//! Run with `cargo test --test integration`.
 
-mod common;
+use crate::common::{mark_public, render, serve, setup, Reply};
 
-use common::{mark_public, render, serve, setup, Reply};
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_redirected_cross_origin_stylesheet_is_not_readable() {
+pub async fn a_redirected_cross_origin_stylesheet_is_not_readable() {
     setup();
     let other = serve("127.0.0.1:0", |req| match req.route() {
         "/cross.css" => Reply::ok_with_type(b"p { color: red; }".to_vec(), "text/css"),
@@ -41,5 +38,4 @@ async fn a_redirected_cross_origin_stylesheet_is_not_readable() {
         rendered.text.contains("TAINT:SecurityError"),
         "the cross-origin stylesheet was readable after a redirect: {rendered:?}"
     );
-    cherrypi_fetch::shutdown_renderer();
 }

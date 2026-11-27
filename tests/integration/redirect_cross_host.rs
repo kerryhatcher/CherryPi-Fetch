@@ -5,16 +5,13 @@
 //!
 //! Both cases run in one test: the renderer starts once per process.
 //!
-//! Run with `cargo test --test redirect_cross_host`. The second host is named
+//! Run with `cargo test --test integration`. The second host is named
 //! `localhost` and the unmarked one is `[::1]`, so no test needs 127.0.0.2, which
 //! macOS does not route to loopback by default.
 
-mod common;
+use crate::common::{mark_public, render, serve, setup, Reply};
 
-use common::{mark_public, render, serve, setup, Reply};
-
-#[tokio::test(flavor = "multi_thread")]
-async fn redirects_between_hosts_follow_the_address_check_on_each_hop() {
+pub async fn redirects_between_hosts_follow_the_address_check_on_each_hop() {
     setup();
 
     // Case 1: public origin -> another public host renders the target.
@@ -60,5 +57,4 @@ async fn redirects_between_hosts_follow_the_address_check_on_each_hop() {
             .is_ok_and(|p| p.text.contains("UNMARKED-TARGET")),
         "the unmarked target's body reached the page: {page:?}"
     );
-    cherrypi_fetch::shutdown_renderer();
 }
