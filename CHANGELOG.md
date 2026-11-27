@@ -9,6 +9,40 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `cherrypi-fetch mcp`, a stdio MCP server with one tool, `fetch_page`. It
+  renders a page in Servo and returns its title and text. Invalid input and a
+  failed render are tool errors (`isError`). The server is behind the `mcp`
+  feature, which is on by default. `--no-default-features --features cli`
+  builds the command without it.
+
+### Changed
+
+- `rmcp` is a caret requirement (`3.12`), so library users are not pinned to
+  one patch release. Install with `cargo install --locked` to build with the
+  versions in `Cargo.lock`.
+
+### Fixed
+
+- A page whose main document fails to load (connection refused, DNS failure,
+  a bad port, or a TLS error) is a failed render: `RenderError::Failed` with
+  Servo's reason, `ok:false` and exit 1 from the CLI, and `isError` from MCP.
+  It used to come back as `ok:true` with Servo's error page as the text.
+- `cherrypi-fetch mcp` exits on SIGTERM or SIGINT while its client keeps stdin
+  open. It waits at most two seconds for the service to stop, then stops
+  Servo. A render already in progress still finishes first, and the server
+  logs that to stderr.
+- A call that is cancelled while it waits for the renderer no longer renders
+  the page once its turn comes. A render that has started still runs to its
+  end, because Servo cannot abort a load.
+- `cherrypi-fetch --json mcp` (an option before `mcp`) explains that `mcp` is a
+  subcommand, rather than reporting an invalid URL.
+- The `fetch_page` input schema states the ranges and defaults, and whole
+  numbers sent as floats (`20.0`) are accepted.
+
 ## [0.1.1] - 2026-11-26
 
 ### Fixed

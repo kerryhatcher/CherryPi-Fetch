@@ -48,8 +48,9 @@ clap = { version = "4", features = ["derive"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
-# Pinned exactly: the MCP wire behaviour in src/mcp.rs is tested against this version.
-rmcp = { version = "=3.12.0", default-features = false, features = ["server", "transport-io"], optional = true }
+# A caret requirement, so library users with `mcp` on are not forced onto one rmcp
+# patch release. Cargo.lock pins 3.12.0 for the binary; install with `--locked`.
+rmcp = { version = "3.12", default-features = false, features = ["server", "transport-io"], optional = true }
 schemars = { version = "1", optional = true }
 
 # Let `cargo binstall` fetch the prebuilt archive from the GitHub release

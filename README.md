@@ -10,7 +10,7 @@ harness.
 
 ```sh
 cargo binstall cherrypi-fetch   # prebuilt binary, no Servo build
-cargo install cherrypi-fetch    # build from source
+cargo install --locked cherrypi-fetch    # build from source, with the locked dependency versions
 ```
 
 `cargo binstall` needs [cargo-binstall](https://github.com/cargo-bins/cargo-binstall)

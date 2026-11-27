@@ -98,3 +98,50 @@ fn usage_errors_exit_1_and_help_exits_0() {
     assert_eq!(help.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&help.stdout).contains("Exit status"));
 }
+
+/// An address that nothing listens on: the port was free a moment ago.
+fn closed_url() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    format!("http://{addr}/")
+}
+
+#[test]
+fn a_page_that_cannot_load_is_a_failed_render() {
+    // Port 9 is a "bad port" that Servo refuses; the other is closed.
+    for url in [closed_url(), "http://127.0.0.1:9/".to_string()] {
+        let output = cherrypi_fetch().args(["--json", &url]).output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let record: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON line");
+        assert_eq!(record["ok"], false, "{url}: {record}");
+        assert!(record["title"].is_null(), "{url}: {record}");
+        assert!(record["text"].is_null(), "{url}: {record}");
+        let error = record["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("Could not load the requested page"),
+            "{url}: {error}"
+        );
+        assert_eq!(output.status.code(), Some(1), "{url} exits 1");
+    }
+
+    let url = closed_url();
+    let output = cherrypi_fetch().arg(&url).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&url) && stderr.contains("Could not load"),
+        "{stderr}"
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).is_empty());
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn mcp_after_an_option_explains_itself() {
+    let output = cherrypi_fetch().args(["--json", "mcp"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("`mcp` is a subcommand"), "{stderr}");
+    assert!(!stderr.contains("invalid URL"), "{stderr}");
+}

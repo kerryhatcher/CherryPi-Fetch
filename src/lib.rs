@@ -152,14 +152,14 @@ const HOP_BY_HOP: &[&str] = &[
 /// style, and template content removed.
 const SNAPSHOT_SCRIPT: &str = "(function () {\
     var body = document.body;\
-    if (!body) { return {title: document.title, text: ''}; }\
+    if (!body) { return {title: document.title, text: '', origin: window.origin}; }\
     var text = body.innerText;\
     if (typeof text !== 'string') {\
         var copy = body.cloneNode(true);\
         copy.querySelectorAll('script, style, noscript, template').forEach(function (node) { node.remove(); });\
         text = copy.textContent;\
     }\
-    return {title: document.title, text: text};\
+    return {title: document.title, text: text, origin: window.origin};\
 })()";
 
 /// A rendered page: its title and the visible text, one line per block.
@@ -199,7 +199,8 @@ static RENDERER: Mutex<Lifecycle> = Mutex::new(Lifecycle::NotStarted);
 
 /// Render `url` in Servo and return its title and text. The page is loaded
 /// fresh every call. Errors cover startup failures, a page that never produced
-/// any text, and a render thread that does not answer. A page that loads but
+/// any text, a main document that did not load (connection refused, DNS
+/// failure, a bad port, TLS), and a render thread that does not answer. A page that loads but
 /// does not settle in time is returned with [`RenderedPage::incomplete`] set.
 ///
 /// Must be called from within a Tokio runtime, which also carries the HTTP
@@ -325,6 +326,10 @@ struct Snapshot {
     pending: bool,
     /// Successful samples received so far.
     samples: u32,
+    /// The document's origin is opaque. Servo gives its own error page an opaque
+    /// origin when the main document could not be loaded: connection refused,
+    /// DNS failure, a bad port, or a TLS failure. A page that loaded has a real origin.
+    opaque_origin: bool,
 }
 
 /// Receives the page's resource requests. Requests this module makes itself
@@ -630,6 +635,7 @@ fn render_one(
                     if let Ok(JSValue::Object(fields)) = result {
                         snap.title = string_field(&fields, "title");
                         snap.text = string_field(&fields, "text");
+                        snap.opaque_origin = string_field(&fields, "origin") == "null";
                         snap.samples += 1;
                     }
                 });
@@ -670,6 +676,25 @@ fn render_one(
     }
 
     let snap = snapshot.borrow();
+    if snap.opaque_origin {
+        // Servo's error page is showing, so the main document did not load. The
+        // first line of its text is Servo's reason, such as "Could not load the
+        // requested page: client error (Connect)". The rest of the page (a TLS
+        // error page also carries the certificate) is left out.
+        let text = normalize_text(&sanitize_control(&snap.text));
+        let reason: String = text
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(300)
+            .collect();
+        return Err(if reason.is_empty() {
+            "the page could not be loaded".to_string()
+        } else {
+            reason
+        });
+    }
     let stalled = snap.pending
         && last_sample.is_some_and(|sent| Instant::now().duration_since(sent) >= STALL_AFTER);
     let secs = job.timeout.as_secs();

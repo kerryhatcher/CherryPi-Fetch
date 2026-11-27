@@ -3,7 +3,7 @@
 //! Servo starts on the first call and stays up for later ones. Renders run one
 //! at a time. Logs go to stderr; stdout carries only JSON-RPC messages.
 
-use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cherrypi_fetch::{RenderedPage, MAX_TIMEOUT, RENDER_TIMEOUT};
@@ -22,6 +22,9 @@ use tokio::sync::Mutex;
 const TOOL_NAME: &str = "fetch_page";
 const DEFAULT_MAX_CHARS: usize = 40_000;
 const MAX_CHARS_LIMIT: u64 = 200_000;
+/// How long to wait for the MCP service to stop after a signal. rmcp cannot
+/// interrupt a blocking read of stdin, so the service may keep waiting on it.
+const STOP_GRACE: Duration = Duration::from_secs(2);
 
 const TOOL_DESCRIPTION: &str = "Render a web page in Servo, a real browser engine, and return \
     its title and visible text. Use it when the page needs JavaScript: a single-page app, or a \
@@ -41,7 +44,7 @@ struct FetchPageOutput {
     incomplete: Option<String>,
     /// Whether `text` was cut to `max_chars`.
     truncated: bool,
-    /// Time spent rendering, in milliseconds.
+    /// Time spent rendering, in milliseconds. Time spent waiting for an earlier render is not counted.
     elapsed_ms: u64,
 }
 
@@ -59,7 +62,9 @@ struct FetchRequest {
 /// reply time while it waited.
 #[derive(Default)]
 struct FetchServer {
-    render_lock: Mutex<()>,
+    /// Held for the length of one render. `serve_stdio` also looks at it, to
+    /// say when a shutdown has to wait for a render.
+    render_lock: Arc<Mutex<()>>,
 }
 
 impl ServerHandler for FetchServer {
@@ -86,7 +91,7 @@ impl ServerHandler for FetchServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         if request.name.as_ref() != TOOL_NAME {
             return Err(ErrorData::invalid_params(
@@ -95,7 +100,7 @@ impl ServerHandler for FetchServer {
             ));
         }
         let result = match parse_request(request.arguments.as_ref()) {
-            Ok(fetch) => self.fetch(fetch).await,
+            Ok(fetch) => self.fetch(fetch, context).await,
             Err(message) => tool_error(message),
         };
         Ok(result.into())
@@ -103,11 +108,33 @@ impl ServerHandler for FetchServer {
 }
 
 impl FetchServer {
-    async fn fetch(&self, request: FetchRequest) -> CallToolResult {
+    async fn fetch(
+        &self,
+        request: FetchRequest,
+        context: RequestContext<RoleServer>,
+    ) -> CallToolResult {
         // TODO(#12): once RendererConfig has allow_private_networks, pass it
         // through here. The --allow-private flag must then also be accepted
         // with `mcp`, which means relaxing args_conflicts_with_subcommands.
-        let _render = self.render_lock.lock().await;
+        let cancelled = || tool_error("the call was cancelled before its render started");
+        let _render = if let Ok(guard) = self.render_lock.try_lock() {
+            guard
+        } else {
+            eprintln!("cherrypi-fetch: waiting for an earlier render to finish");
+            // A cancelled call leaves the queue here, so it never starts a render.
+            tokio::select! {
+                guard = self.render_lock.lock() => guard,
+                () = context.ct.cancelled() => return cancelled(),
+            }
+        };
+        // Both branches of the select can be ready at once, and the lock can be
+        // free before the client cancels. Check again before starting Servo's work.
+        if context.ct.is_cancelled() {
+            return cancelled();
+        }
+        // Once a render has started it cannot be stopped: Servo has no way to
+        // abort a load. A cancel that arrives now runs the render to its end,
+        // and its result is dropped.
         let started = Instant::now();
         let rendered = cherrypi_fetch::render_page(request.url, request.timeout).await;
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -133,10 +160,15 @@ fn input_schema() -> JsonObject {
             },
             "timeout_secs": {
                 "type": "integer",
+                "minimum": 1,
+                "maximum": 600,
+                "default": 20,
                 "description": "Seconds allowed for the page to load and settle, from 1 to 600. Default 20."
             },
             "max_chars": {
                 "type": "integer",
+                "minimum": 1,
+                "default": 40000,
                 "description": "Keep at most this many characters of text, from 1 to 200000. Larger values are clamped to 200000. Default 40000."
             }
         },
@@ -183,14 +215,22 @@ fn parse_request(arguments: Option<&JsonObject>) -> Result<FetchRequest, String>
     })
 }
 
+/// A whole, non-negative number. Some clients send whole numbers as floats
+/// (`20.0`), so those are accepted too; `1.5` and strings are not.
 fn optional_integer(arguments: &JsonObject, key: &str) -> Result<Option<u64>, String> {
-    match arguments.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(value) => value
-            .as_u64()
-            .map(Some)
-            .ok_or_else(|| format!("{key} must be a whole number")),
-    }
+    let whole = match arguments.get(key) {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Number(number)) => number.as_u64().or_else(|| {
+            number
+                .as_f64()
+                .filter(|f| f.fract() == 0.0 && (0.0..u64::MAX as f64).contains(f))
+                .map(|f| f as u64)
+        }),
+        Some(_) => None,
+    };
+    whole
+        .map(Some)
+        .ok_or_else(|| format!("{key} must be a whole number"))
 }
 
 /// Successful output: a text block the reader can scan, and the structured record.
@@ -232,13 +272,19 @@ fn tool_error(message: impl Into<String>) -> CallToolResult {
 }
 
 /// Serve MCP over stdio until stdin closes or the process is interrupted, then
-/// stop Servo. Exit 0 on a clean stop, 1 if the server itself failed.
-pub async fn serve_stdio() -> ExitCode {
-    let service = match FetchServer::default().serve(stdio()).await {
+/// stop Servo and exit. Exit 0 on a clean stop, 1 if the server itself failed.
+///
+/// This ends the process itself rather than returning. The Tokio runtime waits
+/// for its blocking threads when `main` returns, and the thread reading stdin
+/// cannot be interrupted, so a signal with stdin still open would hang there.
+pub async fn serve_stdio() -> ! {
+    let server = FetchServer::default();
+    let busy = server.render_lock.clone();
+    let service = match server.serve(stdio()).await {
         Ok(service) => service,
         Err(e) => {
             eprintln!("cherrypi-fetch: MCP startup failed: {e}");
-            return ExitCode::from(1);
+            std::process::exit(1);
         }
     };
     let cancel = service.cancellation_token();
@@ -248,21 +294,29 @@ pub async fn serve_stdio() -> ExitCode {
         joined = &mut quit => flatten_join(joined),
         () = shutdown_signal() => {
             cancel.cancel();
-            flatten_join(quit.await)
+            // Bounded: the service may stay blocked on stdin, which is fine. Go on after the grace period.
+            match tokio::time::timeout(STOP_GRACE, &mut quit).await {
+                Ok(joined) => flatten_join(joined),
+                Err(_) => Ok(()),
+            }
         }
     };
 
+    if busy.try_lock().is_err() {
+        eprintln!("cherrypi-fetch: stopping; waiting for the render in progress to finish");
+    }
     // Servo may be partway through a render. This waits for that render to end,
     // so it runs on a blocking thread rather than a runtime worker.
     let _ = tokio::task::spawn_blocking(cherrypi_fetch::shutdown_renderer).await;
 
-    match outcome {
-        Ok(()) => ExitCode::SUCCESS,
+    let code = match outcome {
+        Ok(()) => 0,
         Err(message) => {
             eprintln!("cherrypi-fetch: MCP server failed: {message}");
-            ExitCode::from(1)
+            1
         }
-    }
+    };
+    std::process::exit(code)
 }
 
 /// The server task's result: a panic or a failed join is an error.
@@ -344,6 +398,11 @@ mod tests {
             let request = parse(json!({"url": "https://a.test/", "timeout_secs": ok})).unwrap();
             assert_eq!(request.timeout, Duration::from_secs(ok));
         }
+        // Whole numbers sent as floats are accepted.
+        let request = parse(json!({"url": "https://a.test/", "timeout_secs": 20.0})).unwrap();
+        assert_eq!(request.timeout, Duration::from_secs(20));
+        let request = parse(json!({"url": "https://a.test/", "max_chars": 5.0})).unwrap();
+        assert_eq!(request.max_chars, 5);
         for bad in [json!(0), json!(601), json!(-1), json!(1.5), json!("5")] {
             let err =
                 parse(json!({"url": "https://a.test/", "timeout_secs": bad.clone()})).unwrap_err();
@@ -379,5 +438,18 @@ mod tests {
         ] {
             assert!(properties.contains_key(key), "missing {key}");
         }
+    }
+
+    #[test]
+    fn input_schema_states_the_ranges_and_defaults() {
+        let schema = input_schema();
+        let properties = &schema["properties"];
+        assert_eq!(properties["timeout_secs"]["minimum"], 1);
+        assert_eq!(properties["timeout_secs"]["maximum"], 600);
+        assert_eq!(properties["timeout_secs"]["default"], 20);
+        assert_eq!(properties["max_chars"]["minimum"], 1);
+        // No maximum for max_chars: larger values are clamped, not refused.
+        assert!(properties["max_chars"].get("maximum").is_none());
+        assert_eq!(properties["max_chars"]["default"], 40_000);
     }
 }

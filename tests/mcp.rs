@@ -1,5 +1,6 @@
 //! Runs `cherrypi-fetch mcp` over stdio: MCP handshake, `tools/list`,
-//! `tools/call` against a local page, invalid input, and shutdown.
+//! `tools/call` against a local page, invalid input, a page that cannot load,
+//! cancellation, and shutdown.
 //!
 //! Every line the server writes to stdout is parsed and checked to be a
 //! JSON-RPC 2.0 message, so any stray output fails the test.
@@ -9,7 +10,7 @@
 #![cfg(all(feature = "cli", feature = "mcp"))]
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -26,26 +27,51 @@ const PAGE: &str = "<html><head><title>MCP Test</title></head><body>\
     <script>setTimeout(function(){document.getElementById('app').textContent='mcp-rendered-marker';},200);</script>\
     </body></html>";
 
+/// Path that the test server accepts and never answers.
+const HANG_PATH: &str = "hang";
+
+/// Serves `PAGE` at the returned URL, and never answers `HANG_PATH`.
 fn serve() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     thread::spawn(move || {
-        for mut stream in listener.incoming().flatten() {
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
-                    break;
-                }
-            }
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{PAGE}",
-                PAGE.len()
-            );
-            let _ = stream.write_all(resp.as_bytes());
+        for stream in listener.incoming().flatten() {
+            thread::spawn(move || answer(stream));
         }
     });
+    format!("http://{addr}/")
+}
+
+fn answer(mut stream: TcpStream) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+        return;
+    }
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+            break;
+        }
+    }
+    if request_line.contains(&format!("/{HANG_PATH}")) {
+        // Hold the connection without answering. The thread ends with the test process.
+        thread::sleep(Duration::from_secs(600));
+        return;
+    }
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{PAGE}",
+        PAGE.len()
+    );
+    let _ = stream.write_all(resp.as_bytes());
+}
+
+/// An address that nothing listens on: the port was free a moment ago.
+fn closed_url() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
     format!("http://{addr}/")
 }
 
@@ -98,12 +124,23 @@ impl Server {
         stdin.flush().unwrap();
     }
 
-    /// Send a request and return its response, skipping anything else the
-    /// server sends first. Every stdout line is checked as JSON-RPC.
-    fn request(&mut self, method: &str, params: Value) -> Value {
+    /// Send a request without waiting for its answer. Returns its id.
+    fn send_request(&mut self, method: &str, params: Value) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
         self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        id
+    }
+
+    /// Send a request and return its response, skipping anything else the
+    /// server sends first. Every stdout line is checked as JSON-RPC.
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        let id = self.send_request(method, params);
+        self.wait_response(id)
+    }
+
+    /// Return the response to request `id`, checking every line on the way.
+    fn wait_response(&mut self, id: u64) -> Value {
         loop {
             let message = self.next_message();
             if message.get("id") == Some(&json!(id))
@@ -114,8 +151,13 @@ impl Server {
         }
     }
 
-    fn notify(&mut self, method: &str) {
-        self.send(&json!({"jsonrpc": "2.0", "method": method}));
+    /// Send a notification. `Value::Null` sends none of `params`.
+    fn notify(&mut self, method: &str, params: Value) {
+        let mut message = json!({"jsonrpc": "2.0", "method": method});
+        if !params.is_null() {
+            message["params"] = params;
+        }
+        self.send(&message);
     }
 
     fn next_message(&mut self) -> Value {
@@ -125,21 +167,22 @@ impl Server {
         }
     }
 
-    /// Close stdin and wait for the server to exit. Returns its status after
-    /// checking that stdout held nothing but JSON-RPC until it closed.
-    fn finish(mut self) -> ExitStatus {
-        drop(self.stdin.take());
+    /// Wait up to `limit` for the server to exit. Stdin stays as it is.
+    fn wait_for_exit(&mut self, limit: Duration) -> Option<ExitStatus> {
         let started = Instant::now();
-        let status = loop {
+        loop {
             if let Some(status) = self.child.try_wait().unwrap() {
-                break status;
+                return Some(status);
             }
-            if started.elapsed() > WAIT {
-                let _ = self.child.kill();
-                panic!("server did not exit after stdin closed");
+            if started.elapsed() > limit {
+                return None;
             }
             thread::sleep(Duration::from_millis(20));
-        };
+        }
+    }
+
+    /// Read stdout until it closes, checking that each line is JSON-RPC.
+    fn drain_stdout(&mut self) {
         loop {
             match self.stdout.recv_timeout(Duration::from_secs(5)) {
                 Ok(line) => {
@@ -149,6 +192,17 @@ impl Server {
                 Err(RecvTimeoutError::Timeout) => panic!("stdout stayed open after exit"),
             }
         }
+    }
+
+    /// Close stdin and wait for the server to exit. Returns its status after
+    /// checking that stdout held nothing but JSON-RPC until it closed.
+    fn finish(mut self) -> ExitStatus {
+        drop(self.stdin.take());
+        let Some(status) = self.wait_for_exit(WAIT) else {
+            let _ = self.child.kill();
+            panic!("server did not exit after stdin closed");
+        };
+        self.drain_stdout();
         status
     }
 }
@@ -180,7 +234,7 @@ fn start_session() -> Server {
         init["result"]["capabilities"]["tools"].is_object(),
         "tools capability missing: {init}"
     );
-    server.notify("notifications/initialized");
+    server.notify("notifications/initialized", Value::Null);
     server
 }
 
@@ -294,6 +348,21 @@ fn invalid_input_is_a_tool_error_not_a_protocol_error() {
 }
 
 #[test]
+fn a_page_that_cannot_load_is_a_tool_error() {
+    let mut server = start_session();
+    let result = call_fetch(&mut server, json!({"url": closed_url()}));
+    assert_eq!(result["isError"], true, "{result}");
+    assert!(
+        result.get("structuredContent").is_none(),
+        "a failed load gave structured content: {result}"
+    );
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.starts_with("render failed: "), "{text}");
+    let status = server.finish();
+    assert_eq!(status.code(), Some(0));
+}
+
+#[test]
 fn unknown_tools_are_protocol_errors() {
     let mut server = start_session();
     let response = server.request("tools/call", json!({"name": "no_such_tool"}));
@@ -302,20 +371,71 @@ fn unknown_tools_are_protocol_errors() {
     assert_eq!(status.code(), Some(0));
 }
 
-#[cfg(unix)]
 #[test]
-fn sigterm_shuts_the_server_down_cleanly() {
-    let url = serve();
+fn a_cancelled_call_waiting_for_the_renderer_never_renders() {
+    let page = serve();
+    let hang = format!("{page}{HANG_PATH}");
     let mut server = start_session();
-    let _ = call_fetch(&mut server, json!({"url": url}));
 
-    let pid = server.child.id();
-    let status = Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
-        .status()
-        .unwrap();
-    assert!(status.success());
+    // The first call holds the renderer until its own 3-second timeout ends the render.
+    let first = server.send_request(
+        "tools/call",
+        json!({"name": "fetch_page", "arguments": {"url": hang, "timeout_secs": 3}}),
+    );
+    thread::sleep(Duration::from_millis(500));
+    // The second call queues behind it. Had it rendered, it would run for 20 seconds.
+    let queued = server.send_request(
+        "tools/call",
+        json!({"name": "fetch_page", "arguments": {"url": hang, "timeout_secs": 20}}),
+    );
+    thread::sleep(Duration::from_millis(500));
+    server.notify(
+        "notifications/cancelled",
+        json!({"requestId": queued, "reason": "test"}),
+    );
+
+    let first_response = server.wait_response(first);
+    assert_eq!(
+        first_response["result"]["isError"], true,
+        "{first_response}"
+    );
+
+    // The renderer is free again. A fresh call must not wait out the cancelled one.
+    let started = Instant::now();
+    let result = call_fetch(&mut server, json!({"url": page}));
+    let waited = started.elapsed();
+    assert_eq!(result["structuredContent"]["title"], "MCP Test", "{result}");
+    assert!(
+        waited < Duration::from_secs(15),
+        "the cancelled call still rendered: the next call took {waited:?}"
+    );
 
     let status = server.finish();
-    assert_eq!(status.code(), Some(0), "SIGTERM exits 0");
+    assert_eq!(status.code(), Some(0));
+}
+
+#[cfg(unix)]
+#[test]
+fn sigterm_and_sigint_stop_the_server_while_stdin_stays_open() {
+    for signal in ["-TERM", "-INT"] {
+        let url = serve();
+        let mut server = start_session();
+        let _ = call_fetch(&mut server, json!({"url": url}));
+
+        // The client keeps stdin open, as MCP clients do until they are done with the server.
+        let pid = server.child.id().to_string();
+        let status = Command::new("kill")
+            .args([signal, pid.as_str()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let exit = server
+            .wait_for_exit(Duration::from_secs(15))
+            .unwrap_or_else(|| panic!("{signal} did not stop the server with stdin open"));
+        assert_eq!(exit.code(), Some(0), "{signal} exits 0");
+
+        drop(server.stdin.take());
+        server.drain_stdout();
+    }
 }
