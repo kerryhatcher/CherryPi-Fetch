@@ -1403,81 +1403,100 @@ fn render_one(
         thread::sleep(Duration::from_millis(10));
     }
 
-    let snap = snapshot.borrow();
-    // A page can imitate the template after an iframe fails; in that case it
-    // is classified as failed. The flag alone cannot distinguish failed frames.
-    if snap.error_page
-        && servo_resources::ERROR_TEMPLATE_READ.load(std::sync::atomic::Ordering::SeqCst)
-    {
-        // Servo's error page is showing, so the main document did not load. The
-        // first line of its text is Servo's reason, such as "Could not load the
-        // requested page: client error (Connect)". The rest of the page (a TLS
-        // error page also carries the certificate) is left out.
+    let result = (|| {
+        let snap = snapshot.borrow();
+        // A page can imitate the template after an iframe fails; in that case it
+        // is classified as failed. The flag alone cannot distinguish failed frames.
+        if snap.error_page
+            && servo_resources::ERROR_TEMPLATE_READ.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            // Servo's error page is showing, so the main document did not load. The
+            // first line of its text is Servo's reason, such as "Could not load the
+            // requested page: client error (Connect)". The rest of the page (a TLS
+            // error page also carries the certificate) is left out.
+            let text = normalize_text(&sanitize_control(&snap.text));
+            let reason: String = text
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(300)
+                .collect();
+            return Err(if reason.is_empty() {
+                "the page could not be loaded".to_string()
+            } else {
+                reason
+            });
+        }
+        let stalled = snap.pending
+            && last_sample.is_some_and(|sent| Instant::now().duration_since(sent) >= STALL_AFTER);
+        let secs = budget_label(job.timeout);
+        if snap.samples == 0 {
+            return Err(if stalled {
+                format!(
+                    "page scripts stopped responding before any text could be read (waited {secs})"
+                )
+            } else {
+                format!("page did not finish loading within {secs}")
+            });
+        }
         let text = normalize_text(&sanitize_control(&snap.text));
-        let reason: String = text
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .chars()
-            .take(300)
-            .collect();
-        return Err(if reason.is_empty() {
-            "the page could not be loaded".to_string()
-        } else {
-            reason
-        });
-    }
-    let stalled = snap.pending
-        && last_sample.is_some_and(|sent| Instant::now().duration_since(sent) >= STALL_AFTER);
-    let secs = budget_label(job.timeout);
-    if snap.samples == 0 {
-        drop(snap);
-        cancel_pending(&mut proxy, &delegate);
-        return Err(if stalled {
-            format!("page scripts stopped responding before any text could be read (waited {secs})")
-        } else {
-            format!("page did not finish loading within {secs}")
-        });
-    }
-    let text = normalize_text(&sanitize_control(&snap.text));
-    let incomplete = if settled {
-        None
-    } else if text.is_empty() {
-        Some(format!(
+        let incomplete = if settled {
+            None
+        } else if text.is_empty() {
+            Some(format!(
             "the page showed no readable text after {secs}. The site may be blocking \
              automated browsers, or the page may need a login. Fetching it again is unlikely to help."
         ))
-    } else if stalled {
-        Some(
-            "the page's scripts stopped responding, probably waiting on a request that never \
+        } else if stalled {
+            Some(
+                "the page's scripts stopped responding, probably waiting on a request that never \
              finished. This text was captured before that and may be missing content."
-                .to_string(),
-        )
-    } else if loaded_at.is_none() {
-        Some(format!(
-            "the page was still loading after {secs}. Some content may be missing."
-        ))
-    } else if !proxy.in_flight.is_empty() {
-        Some(format!(
+                    .to_string(),
+            )
+        } else if loaded_at.is_none() {
+            Some(format!(
+                "the page was still loading after {secs}. Some content may be missing."
+            ))
+        } else if !proxy.in_flight.is_empty() {
+            Some(format!(
             "the page was still waiting on {} of its own requests after {secs}. Some content may be missing.",
             proxy.in_flight.len()
         ))
-    } else {
-        Some(format!(
-            "the page was still changing after {secs}. Some content may be missing."
-        ))
-    };
-    let title = sanitize_control(&snap.title)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    drop(snap);
+        } else {
+            Some(format!(
+                "the page was still changing after {secs}. Some content may be missing."
+            ))
+        };
+        let title = sanitize_control(&snap.title)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        Ok(RenderedPage {
+            title,
+            text,
+            incomplete,
+        })
+    })();
     cancel_pending(&mut proxy, &delegate);
-    Ok(RenderedPage {
-        title,
-        text,
-        incomplete,
-    })
+    assert!(
+        delegate.held.borrow().is_empty()
+            && proxy.checking.is_empty()
+            && proxy.in_flight.is_empty()
+            && proxy.tasks.is_empty(),
+        "render cleanup left pending loads or tasks"
+    );
+    result
+}
+
+#[cfg(feature = "__test-hooks")]
+static CLEANUP_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Count completed per-render cleanups for regression tests.
+#[cfg(feature = "__test-hooks")]
+#[doc(hidden)]
+pub fn test_cleanup_count() -> u64 {
+    CLEANUP_COUNT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Cancel every load that is still waiting, in the proxy and in the delegate,
@@ -1488,6 +1507,8 @@ fn cancel_pending(proxy: &mut Proxy, delegate: &PageDelegate) {
     for load in held {
         cancel_load(load);
     }
+    #[cfg(feature = "__test-hooks")]
+    CLEANUP_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Collapse whitespace within each line and drop empty lines.

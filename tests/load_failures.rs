@@ -50,11 +50,17 @@ async fn classifies_main_document_loads() {
         "http://127.0.0.1:9/",
         "http://this-domain-does-not-exist.invalid/",
     ] {
+        let before = cherrypi_fetch::test_cleanup_count();
         assert!(
             render_page(value.parse().unwrap(), Duration::from_secs(10))
                 .await
                 .is_err(),
             "{value}"
+        );
+        assert_eq!(
+            cherrypi_fetch::test_cleanup_count(),
+            before + 1,
+            "cleanup missing for {value}"
         );
     }
     shutdown_renderer();
