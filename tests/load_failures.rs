@@ -30,10 +30,15 @@ async fn classifies_main_document_loads() {
                     "<html><body>pending<script>fetch('/held');</script></body></html>".to_string(),
                 )
             } else if request.starts_with("GET /held ") {
+                // Arm the failure only now, while this request is held open, so
+                // the proxy task is certainly still running when it fires.
+                cherrypi_fetch::test_fail_with_pending();
                 std::thread::sleep(Duration::from_secs(5));
                 continue;
             } else if request.starts_with("GET /shadow ") {
                 ("", "<html><body>shadow success<script>document.body.querySelector = undefined;</script></body></html>".to_string())
+            } else if request.starts_with("GET /accessor ") {
+                ("", "<html><body>accessor success<script>Object.defineProperty(Element.prototype, 'querySelector', {get: function () { throw new Error('no'); }});</script></body></html>".to_string())
             } else if request.starts_with("GET /prototype ") {
                 ("", "<html><body>prototype success<script>Element.prototype.querySelector = undefined;</script></body></html>".to_string())
             } else {
@@ -43,7 +48,14 @@ async fn classifies_main_document_loads() {
             let _ = stream.write_all(response.as_bytes());
         }
     });
-    for path in ["sandbox", "origin", "iframe", "shadow", "prototype"] {
+    for path in [
+        "sandbox",
+        "origin",
+        "iframe",
+        "shadow",
+        "prototype",
+        "accessor",
+    ] {
         let page = render_page(
             format!("http://{addr}/{path}").parse().unwrap(),
             Duration::from_secs(10),
@@ -107,7 +119,6 @@ async fn classifies_main_document_loads() {
         );
     }
     let before = cherrypi_fetch::test_pending_cleanup_counts();
-    cherrypi_fetch::test_fail_with_pending();
     let error = render_page(
         format!("http://{addr}/pending").parse().unwrap(),
         Duration::from_secs(10),
@@ -118,7 +129,17 @@ async fn classifies_main_document_loads() {
         error.to_string().contains("test failure with pending work"),
         "{error}"
     );
-    let after = cherrypi_fetch::test_pending_cleanup_counts();
+    // An aborted task is dropped on the runtime soon after the abort; /held
+    // answers only after 5 seconds, so a task that was not aborted cannot be
+    // counted within this wait.
+    let mut after = cherrypi_fetch::test_pending_cleanup_counts();
+    for _ in 0..40 {
+        if after.1 > before.1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        after = cherrypi_fetch::test_pending_cleanup_counts();
+    }
     shutdown_renderer();
     assert!(after.0 > before.0, "pending load was not cancelled");
     assert!(after.1 > before.1, "pending task was not aborted");

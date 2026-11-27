@@ -481,19 +481,19 @@ const HOP_BY_HOP: &[&str] = &[
 /// are left out, along with script and style source. If `innerText` is not
 /// available, it falls back to the text of a copy of the body with script,
 /// style, and template content removed.
+///
+/// The error-page check runs last, entirely inside its own `try`, including
+/// the lookup of the prototype methods it uses. Page script can make any of
+/// those lookups throw, and the snapshot read before it must survive that.
 const SNAPSHOT_SCRIPT: &str = "(function () {\
-    var query = Element.prototype.querySelector;\
-    var queryAll = Element.prototype.querySelectorAll;\
-    var clone = Node.prototype.cloneNode;\
-    var remove = Node.prototype.removeChild;\
-    var startsWith = String.prototype.startsWith;\
     var body = document.body;\
     var title = document.title;\
     if (!body) { return {title: title, text: '', error_page: ''}; }\
     var text = body.innerText;\
     if (typeof text !== 'string') {\
-        var copy = clone.call(body, true);\
-        var excluded = queryAll.call(copy, 'script, style, noscript, template');\
+        var copy = Node.prototype.cloneNode.call(body, true);\
+        var remove = Node.prototype.removeChild;\
+        var excluded = Element.prototype.querySelectorAll.call(copy, 'script, style, noscript, template');\
         for (var i = 0; i < excluded.length; i++) {\
             if (excluded[i].parentNode) { remove.call(excluded[i].parentNode, excluded[i]); }\
         }\
@@ -501,6 +501,8 @@ const SNAPSHOT_SCRIPT: &str = "(function () {\
     }\
     var error = false;\
     try {\
+        var query = Element.prototype.querySelector;\
+        var startsWith = String.prototype.startsWith;\
         var paragraph = query.call(body, 'p');\
         error = (title === 'Error loading page' && paragraph && startsWith.call(paragraph.textContent, 'Could not load the requested page:')) ||\
             (title === 'Certificate error' && query.call(body, '#leave') && query.call(body, '#allow') && query.call(body, '#bytes')) ||\
@@ -1035,7 +1037,15 @@ impl Proxy {
         self.in_flight.insert(id, load);
         self.last_activity = Some(Instant::now());
         let done = self.done_tx.clone();
+        // Counts this task being dropped before it finished, which is what
+        // `abort()` does; a detached handle lets the task run to the end. It is
+        // made out here and moved in, so it is dropped even if the task is
+        // aborted before its first poll.
+        #[cfg(feature = "__test-hooks")]
+        let aborted = TaskAbortProbe(true);
         let handle = self.runtime.spawn(async move {
+            #[cfg(feature = "__test-hooks")]
+            let mut aborted = aborted;
             let result = tokio::time::timeout(REQUEST_TIMEOUT, fetch_redirect_chain(url, chain))
                 .await
                 .unwrap_or_else(|_| {
@@ -1044,6 +1054,10 @@ impl Proxy {
                         REQUEST_TIMEOUT.as_secs()
                     ))
                 });
+            #[cfg(feature = "__test-hooks")]
+            {
+                aborted.0 = false;
+            }
             let _ = done.send((id, result));
         });
         self.tasks.insert(id, handle);
@@ -1059,8 +1073,6 @@ impl Proxy {
             cancel_load(load);
         }
         for (_, handle) in self.tasks.drain() {
-            #[cfg(feature = "__test-hooks")]
-            TEST_TASK_ABORTS.fetch_add(1, Ordering::SeqCst);
             handle.abort();
         }
     }
@@ -1203,10 +1215,11 @@ static RELEASED_LOADS: AtomicU64 = AtomicU64::new(0);
 /// Cancel a load that was not allowed to proceed. Dropping one instead would
 /// let Servo fetch it without a check.
 fn cancel_load(load: WebResourceLoad) {
-    #[cfg(feature = "__test-hooks")]
-    TEST_LOAD_CANCELS.fetch_add(1, Ordering::SeqCst);
     let url = load.request.url.clone().into_url();
     load.intercept(WebResourceResponse::new(url)).cancel();
+    // Counted after the cancel, so a test sees cancels that happened.
+    #[cfg(feature = "__test-hooks")]
+    TEST_LOAD_CANCELS.fetch_add(1, Ordering::SeqCst);
 }
 
 /// The `Location` of a response that redirects. Only 301, 302, 303, 307 and 308
@@ -1525,6 +1538,19 @@ static TEST_LOAD_CANCELS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "__test-hooks")]
 static TEST_TASK_ABORTS: AtomicU64 = AtomicU64::new(0);
 
+/// Counts a proxy task dropped before it finished, that is, aborted.
+#[cfg(feature = "__test-hooks")]
+struct TaskAbortProbe(bool);
+
+#[cfg(feature = "__test-hooks")]
+impl Drop for TaskAbortProbe {
+    fn drop(&mut self) {
+        if self.0 {
+            TEST_TASK_ABORTS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
 /// Arm a failure once a proxied load and its task are both pending.
 #[cfg(feature = "__test-hooks")]
 #[doc(hidden)]
@@ -1532,7 +1558,7 @@ pub fn test_fail_with_pending() {
     TEST_FAIL_WITH_PENDING.store(true, Ordering::SeqCst);
 }
 
-/// Counts of explicit load cancellations and task aborts.
+/// Counts of load cancellations and of proxy tasks dropped unfinished (aborted).
 #[cfg(feature = "__test-hooks")]
 #[doc(hidden)]
 pub fn test_pending_cleanup_counts() -> (u64, u64) {
