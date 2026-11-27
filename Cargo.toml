@@ -25,6 +25,8 @@ include = [
 default = ["cli"]
 # The `cherrypi-fetch` command-line tool. Library users can turn it off.
 cli = ["dep:clap", "dep:serde", "dep:serde_json", "dep:tracing-subscriber"]
+# Test-only hooks for the integration tests. Not part of the public API.
+__test-hooks = []
 
 [[bin]]
 name = "cherrypi-fetch"
@@ -37,8 +39,13 @@ rustls = "0.23"
 url = "2"
 dpi = "0.1"
 cookie = "0.18"
+# The checking proxy's token and the Basic credential Servo sends with it.
+base64 = "0.22"
+getrandom = "0.3"
 content-security-policy = "0.9"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots-no-provider", "http2"] }
+# gzip, brotli, deflate and zstd: the proxied requests decode compressed bodies,
+# so the page never receives a body it cannot read.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots-no-provider", "http2", "gzip", "brotli", "deflate", "zstd"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 thiserror = "2"
@@ -54,3 +61,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optio
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
 pkg-fmt = "tgz"
 bin-dir = "{ bin }{ binary-ext }"
+
+# Only this crate's own tests turn the address-check bypass on: the dev-dependency
+# enables the __test-hooks feature for `cargo test`, and downstream users never see it.
+[dev-dependencies]
+cherrypi-fetch = { path = ".", features = ["__test-hooks"] }
